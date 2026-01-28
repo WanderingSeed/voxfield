@@ -4,7 +4,7 @@
 #include <memory>
 
 #include <cv_bridge/cv_bridge.h>
-#include <sensor_msgs/Image.h>
+#include <sensor_msgs/msg/image.hpp>
 
 #include <voxblox/core/voxel.h>
 #include <voxblox/integrator/intensity_integrator.h>
@@ -12,6 +12,9 @@
 
 #include "voxblox_ros/intensity_vis.h"
 #include "voxblox_ros/tsdf_server.h"
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <voxblox_msgs/msg/mesh.hpp>
 
 namespace voxblox {
 
@@ -19,21 +22,23 @@ class IntensityServer : public TsdfServer {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-  IntensityServer(const ros::NodeHandle& nh, const ros::NodeHandle& nh_private);
+  IntensityServer(const rclcpp::Node::SharedPtr& node);
   virtual ~IntensityServer() {}
 
   virtual void updateMesh();
   virtual void publishPointclouds();
 
-  void intensityImageCallback(const sensor_msgs::ImageConstPtr& image);
+  void intensityImageCallback(
+      const sensor_msgs::msg::Image::ConstSharedPtr image);
 
  protected:
   /// Subscriber for intensity images.
-  ros::Subscriber intensity_image_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr intensity_image_sub_;
 
   // Publish markers for visualization.
-  ros::Publisher intensity_pointcloud_pub_;
-  ros::Publisher intensity_mesh_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      intensity_pointcloud_pub_;
+  rclcpp::Publisher<voxblox_msgs::msg::Mesh>::SharedPtr intensity_mesh_pub_;
 
   /// Parameters of the incoming UNDISTORTED intensity images.
   double focal_length_px_;

@@ -6,29 +6,26 @@
 
 namespace voxblox {
 
-VoxedtServer::VoxedtServer(
-    const ros::NodeHandle& nh, const ros::NodeHandle& nh_private)
+VoxedtServer::VoxedtServer(const rclcpp::Node::SharedPtr& node)
     : VoxedtServer(
-          nh, nh_private, getEsdfMapConfigFromOccMapRosParam(nh_private),
-          getEsdfEdtIntegratorConfigFromRosParam(nh_private),
-          getTsdfMapConfigFromOccMapRosParam(nh_private),
-          getTsdfIntegratorConfigFromRosParam(nh_private),
-          getOccupancyMapConfigFromRosParam(nh_private),
-          getOccTsdfIntegratorConfigFromRosParam(nh_private),
-          getMeshIntegratorConfigFromRosParam(nh_private)) {}
+          node, getEsdfMapConfigFromOccMapRosParam(node),
+          getEsdfEdtIntegratorConfigFromRosParam(node),
+          getTsdfMapConfigFromOccMapRosParam(node),
+          getTsdfIntegratorConfigFromRosParam(node),
+          getOccupancyMapConfigFromRosParam(node),
+          getOccTsdfIntegratorConfigFromRosParam(node),
+          getMeshIntegratorConfigFromRosParam(node)) {}
 
 VoxedtServer::VoxedtServer(
-    const ros::NodeHandle& nh, const ros::NodeHandle& nh_private,
+    const rclcpp::Node::SharedPtr& node,
     const EsdfMap::Config& esdf_config,
-    // const EsdfOccFiestaIntegrator::Config& esdf_integrator_config,
     const EsdfOccEdtIntegrator::Config& esdf_integrator_config,
     const TsdfMap::Config& tsdf_config,
     const TsdfIntegratorBase::Config& tsdf_integrator_config,
     const OccupancyMap::Config& occ_config,
     const OccTsdfIntegrator::Config& occ_tsdf_integrator_config,
     const MeshIntegratorConfig& mesh_config)
-    : TsdfServer(
-          nh, nh_private, tsdf_config, tsdf_integrator_config, mesh_config),
+    : TsdfServer(node, tsdf_config, tsdf_integrator_config, mesh_config),
       clear_sphere_for_planning_(false),
       publish_esdf_map_(false),
       publish_traversable_(false),
@@ -43,92 +40,79 @@ VoxedtServer::VoxedtServer(
 
   // Set up ESDF map and integrator.
   esdf_map_.reset(new EsdfMap(esdf_config));
-  // esdf_integrator_.reset(new EsdfOccFiestaIntegrator(
-  //     esdf_integrator_config, occupancy_map_->getOccupancyLayerPtr(),
-  //     esdf_map_->getEsdfLayerPtr()));
-
   esdf_integrator_.reset(new EsdfOccEdtIntegrator(
       esdf_integrator_config, occupancy_map_->getOccupancyLayerPtr(),
       esdf_map_->getEsdfLayerPtr()));
 
-  // main entrance
-  setupRos();
-}
-
-void VoxedtServer::setupRos() {
-  // Set up publisher.
+  // ROS 2 specific initializations
   esdf_pointcloud_pub_ =
-      nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-          "esdf_pointcloud", 1, true);
-  esdf_slice_pub_ = nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-      "esdf_slice", 1, true);
-  traversable_pub_ = nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-      "traversable", 1, true);
+      node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+          "esdf_pointcloud", rclcpp::QoS(1).transient_local());
+  esdf_slice_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "esdf_slice", rclcpp::QoS(1).transient_local());
+  traversable_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "traversable", rclcpp::QoS(1).transient_local());
   esdf_error_slice_pub_ =
-      nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-          "esdf_error_slice", 1, true);
+      node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+          "esdf_error_slice", rclcpp::QoS(1).transient_local());
+  esdf_map_pub_ = node_->create_publisher<voxblox_msgs::msg::Layer>(
+      "esdf_map_out", rclcpp::QoS(1));
 
-  esdf_map_pub_ =
-      nh_private_.advertise<voxblox_msgs::Layer>("esdf_map_out", 1, false);
+  esdf_map_sub_ = node_->create_subscription<voxblox_msgs::msg::Layer>(
+      "esdf_map_in", rclcpp::QoS(1),
+      std::bind(&VoxedtServer::esdfMapCallback, this, std::placeholders::_1));
 
-  // Set up subscriber.
-  esdf_map_sub_ = nh_private_.subscribe(
-      "esdf_map_in", 1, &VoxedtServer::esdfMapCallback, this);
+  node_->get_parameter_or("clear_sphere_for_planning",
+                          clear_sphere_for_planning_, clear_sphere_for_planning_);
+  node_->get_parameter_or("publish_esdf_map", publish_esdf_map_,
+                          publish_esdf_map_);
+  node_->get_parameter_or("publish_traversable", publish_traversable_,
+                          publish_traversable_);
+  node_->get_parameter_or("traversability_radius", traversability_radius_,
+                          traversability_radius_);
 
-  // Whether to clear each new pose as it comes in, and then set a sphere
-  // around it to occupied.
-  nh_private_.param(
-      "clear_sphere_for_planning", clear_sphere_for_planning_,
-      clear_sphere_for_planning_);
-  nh_private_.param("publish_esdf_map", publish_esdf_map_, publish_esdf_map_);
-
-  // Special output for traversable voxels. Publishes all voxels with distance
-  // at least traversibility radius.
-  nh_private_.param(
-      "publish_traversable", publish_traversable_, publish_traversable_);
-  nh_private_.param(
-      "traversability_radius", traversability_radius_, traversability_radius_);
-
-  double update_esdf_every_n_sec = 1.0;  // default
-  nh_private_.param(
-      "update_esdf_every_n_sec", update_esdf_every_n_sec,
-      update_esdf_every_n_sec);
+  double update_esdf_every_n_sec = 1.0;
+  node_->get_parameter_or("update_esdf_every_n_sec", update_esdf_every_n_sec,
+                          update_esdf_every_n_sec);
 
   bool eval_esdf_on = false;
-  nh_private_.param("eval_esdf_on", eval_esdf_on, eval_esdf_on);
+  node_->get_parameter_or("eval_esdf_on", eval_esdf_on, eval_esdf_on);
 
-  double eval_esdf_every_n_sec = 100.0;  // default
-  nh_private_.param(
-      "eval_esdf_every_n_sec", eval_esdf_every_n_sec, eval_esdf_every_n_sec);
+  double eval_esdf_every_n_sec = 100.0;
+  node_->get_parameter_or("eval_esdf_every_n_sec", eval_esdf_every_n_sec,
+                          eval_esdf_every_n_sec);
 
-  // services for saving maps
-  save_esdf_map_srv_ = nh_private_.advertiseService(
-      "save_esdf_map", &VoxedtServer::saveEsdfMapCallback, this);
+  save_esdf_map_srv_ = node_->create_service<voxblox_msgs::srv::FilePath>(
+      "save_esdf_map",
+      std::bind(&VoxedtServer::saveEsdfMapCallback, this, std::placeholders::_1,
+                std::placeholders::_2));
+  save_occ_map_srv_ = node_->create_service<voxblox_msgs::srv::FilePath>(
+      "save_occ_map",
+      std::bind(&VoxedtServer::saveOccMapCallback, this, std::placeholders::_1,
+                std::placeholders::_2));
+  save_all_map_srv_ = node_->create_service<voxblox_msgs::srv::FilePath>(
+      "save_all_map",
+      std::bind(&VoxedtServer::saveAllMapCallback, this, std::placeholders::_1,
+                std::placeholders::_2));
 
-  save_occ_map_srv_ = nh_private_.advertiseService(
-      "save_occ_map", &VoxedtServer::saveOccMapCallback, this);
-
-  save_all_map_srv_ = nh_private_.advertiseService(
-      "save_all_map", &VoxedtServer::saveAllMapCallback, this);
-
-  // Update ESDF per xx second
   if (update_esdf_every_n_sec > 0.0) {
-    update_esdf_timer_ = nh_private_.createTimer(
-        ros::Duration(update_esdf_every_n_sec), &VoxedtServer::updateEsdfEvent,
-        this);
+    update_esdf_timer_ = node_->create_wall_timer(
+        std::chrono::duration<double>(update_esdf_every_n_sec),
+        std::bind(&VoxedtServer::updateEsdfEvent, this));
   } else {
     update_esdf_every_n_ = static_cast<int>(-1.0 * update_esdf_every_n_sec);
   }
 
   esdf_ready_ = false;
 
-  // Evaluate ESDF accuracy per xx second
   if (eval_esdf_every_n_sec > 0.0 && eval_esdf_on) {
-    eval_esdf_timer_ = nh_private_.createTimer(
-        ros::Duration(eval_esdf_every_n_sec), &VoxedtServer::evalEsdfEvent,
-        this);
+    eval_esdf_timer_ = node_->create_wall_timer(
+        std::chrono::duration<double>(eval_esdf_every_n_sec),
+        std::bind(&VoxedtServer::evalEsdfEvent, this));
   }
 }
+
+
 
 void VoxedtServer::publishAllUpdatedEsdfVoxels() {
   // Create a pointcloud with distance = intensity.
@@ -137,7 +121,11 @@ void VoxedtServer::publishAllUpdatedEsdfVoxels() {
   createDistancePointcloudFromEsdfLayer(esdf_map_->getEsdfLayer(), &pointcloud);
 
   pointcloud.header.frame_id = world_frame_;
-  esdf_pointcloud_pub_.publish(pointcloud);
+  {
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(pointcloud, msg);
+    esdf_pointcloud_pub_->publish(msg);
+  }
 }
 
 void VoxedtServer::publishSlices() {
@@ -150,7 +138,11 @@ void VoxedtServer::publishSlices() {
       esdf_map_->getEsdfLayer(), kZAxisIndex, slice_level_, &pointcloud);
 
   pointcloud.header.frame_id = world_frame_;
-  esdf_slice_pub_.publish(pointcloud);
+  {
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(pointcloud, msg);
+    esdf_slice_pub_->publish(msg);
+  }
 }
 
 void VoxedtServer::visualizeEsdfError() {
@@ -161,12 +153,16 @@ void VoxedtServer::visualizeEsdfError() {
       esdf_map_->getEsdfLayer(), kZAxisIndex, slice_level_, &pointcloud);
 
   pointcloud.header.frame_id = world_frame_;
-  esdf_error_slice_pub_.publish(pointcloud);
+  {
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(pointcloud, msg);
+    esdf_error_slice_pub_->publish(msg);
+  }
 }
 
 // bool VoxedtServer::generateEsdfCallback(
-//     std_srvs::Empty::Request& /*request*/,      // NOLINT
-//     std_srvs::Empty::Response& /*response*/) {  // NOLINT
+//     std_srvs::srv::Empty::Request& /*request*/,      // NOLINT
+//     std_srvs::srv::Empty::Response& /*response*/) {  // NOLINT
 //   const bool clear_esdf = true;
 //   if (clear_esdf) {
 //     esdf_integrator_->updateFromTsdfLayerBatch();
@@ -179,25 +175,25 @@ void VoxedtServer::visualizeEsdfError() {
 //   return true;
 // }
 
-bool VoxedtServer::saveAllMapCallback(
-    voxblox_msgs::FilePath::Request& request, voxblox_msgs::FilePath::Response&
-    /*response*/) {  // NOLINT
-  return saveAllMap(request.file_path);
+void VoxedtServer::saveAllMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response) {
+  response->success = saveAllMap(request->file_path);
 }
 
-bool VoxedtServer::saveEsdfMapCallback(
-    voxblox_msgs::FilePath::Request& request, voxblox_msgs::FilePath::Response&
-    /*response*/) {  // NOLINT
-  return saveEsdfMap(request.file_path);
+void VoxedtServer::saveEsdfMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response) {
+  response->success = saveEsdfMap(request->file_path);
 }
 
-bool VoxedtServer::saveOccMapCallback(
-    voxblox_msgs::FilePath::Request& request, voxblox_msgs::FilePath::Response&
-    /*response*/) {  // NOLINT
-  return saveOccMap(request.file_path);
+void VoxedtServer::saveOccMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response) {
+  response->success = saveOccMap(request->file_path);
 }
 
-void VoxedtServer::updateEsdfEvent(const ros::TimerEvent& /*event*/) {
+void VoxedtServer::updateEsdfEvent() {
   updateOccFromTsdf();
   updateEsdfFromOcc();
   publishOccupancyOccupiedNodes();
@@ -206,7 +202,7 @@ void VoxedtServer::updateEsdfEvent(const ros::TimerEvent& /*event*/) {
     publishSlices();
 }
 
-void VoxedtServer::evalEsdfEvent(const ros::TimerEvent& /*event*/) {
+void VoxedtServer::evalEsdfEvent() {
   if (esdf_ready_) {
     evalEsdfRefOcc();
     visualizeEsdfError();
@@ -214,11 +210,10 @@ void VoxedtServer::evalEsdfEvent(const ros::TimerEvent& /*event*/) {
 }
 
 void VoxedtServer::publishOccupancyOccupiedNodes() {
-  // Create a pointcloud with elevation = intensity.
-  visualization_msgs::MarkerArray marker_array;
+  visualization_msgs::msg::MarkerArray marker_array;
   createOccupancyBlocksFromOccupancyLayer(
       occupancy_map_->getOccupancyLayer(), world_frame_, &marker_array);
-  occupancy_marker_pub_.publish(marker_array);
+  occupancy_marker_pub_->publish(marker_array);
 }
 
 void VoxedtServer::publishPointclouds() {
@@ -238,7 +233,13 @@ void VoxedtServer::publishTraversable() {
   createFreePointcloudFromEsdfLayer(
       esdf_map_->getEsdfLayer(), traversability_radius_, &pointcloud);
   pointcloud.header.frame_id = world_frame_;
-  traversable_pub_.publish(pointcloud);
+  {
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(pointcloud, msg);
+    msg.header.frame_id = world_frame_;
+    msg.header.stamp = node_->now();
+    traversable_pub_->publish(msg);
+  }
 }
 
 void VoxedtServer::publishMap(bool reset_remote_map) {
@@ -246,7 +247,7 @@ void VoxedtServer::publishMap(bool reset_remote_map) {
     return;
   }
 
-  int subscribers = this->esdf_map_pub_.getNumSubscribers();
+  int subscribers = esdf_map_pub_->get_subscription_count();
   if (subscribers > 0) {
     if (num_subscribers_esdf_map_ < subscribers) {
       // Always reset the remote map and send all when a new subscriber
@@ -256,17 +257,17 @@ void VoxedtServer::publishMap(bool reset_remote_map) {
     }
     const bool only_updated = !reset_remote_map;
     timing::Timer publish_map_timer("map/publish_esdf");
-    voxblox_msgs::Layer layer_msg;
+    voxblox_msgs::msg::Layer layer_msg;
     serializeLayerAsMsg<EsdfVoxel>(
         this->esdf_map_->getEsdfLayer(), only_updated, &layer_msg);
     if (reset_remote_map) {
       layer_msg.action = static_cast<uint8_t>(MapDerializationAction::kReset);
     }
-    this->esdf_map_pub_.publish(layer_msg);
+    esdf_map_pub_->publish(layer_msg);
     publish_map_timer.Stop();
   }
   num_subscribers_esdf_map_ = subscribers;
-  TsdfServer::publishMap();
+  TsdfServer::publishMap(reset_remote_map);
 }
 
 bool VoxedtServer::saveAllMap(const std::string& file_path) {
@@ -314,23 +315,23 @@ void VoxedtServer::updateEsdfFromOcc() {
     esdf_integrator_->loadDeleteList(delete_list);
     if (insert_list.size() + delete_list.size() > 0) {
       if (verbose_)
-        ROS_INFO_STREAM(
-            "Insert [" << insert_list.size() << "] and delete ["
-                       << delete_list.size() << "] occupied voxels.");
+        RCLCPP_INFO(node_->get_logger(), "Insert [%zu] and delete [%zu] occupied voxels.",
+                    insert_list.size(), delete_list.size());
 
       const bool clear_updated_flag_esdf = true;
-      ros::WallTime start = ros::WallTime::now();
+      auto start = node_->get_clock()->now();
 
       // set update state to 0 after the processing
       esdf_integrator_->updateFromOccLayer(clear_updated_flag_esdf);
 
-      ros::WallTime end = ros::WallTime::now();
+      auto end = node_->get_clock()->now();
 
       if (verbose_) {
-        ROS_INFO(
+        RCLCPP_INFO(
+            node_->get_logger(),
             "Finished ESDF integrating in [%f] seconds, have [%lu] "
             "blocks(memory : %f MB).",
-            (end - start).toSec(),
+            (end - start).seconds(),
             esdf_map_->getEsdfLayer().getNumberOfAllocatedBlocks(),
             esdf_map_->getEsdfLayer().getMemorySize() / 1024.0 /
                 1024.0);  // NOLINT
@@ -399,7 +400,7 @@ void VoxedtServer::evalEsdfRefOcc() {
   }
   // build the kd tree of the occupied grid point cloud
   pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-  std::cout << "Begin to evaluate ESDF mapping accuracy ";
+  RCLCPP_INFO(node_->get_logger(), "Begin to evaluate ESDF mapping accuracy ");
   kdtree.setInputCloud(occ_ptcloud);
 
   std::vector<int> pointIdxNKNSearch(1);
@@ -458,9 +459,9 @@ void VoxedtServer::evalEsdfRefOcc() {
   double rms = sqrt(mse / total_evaluated_voxels);
   mae /= total_evaluated_voxels;
 
-  std::cout << "Finished evaluating ESDF map.\n"
-            << "\nRMSE:           " << rms << "\nMAE:            " << mae
-            << "\nTotal evaluated:     " << total_evaluated_voxels << "\n";
+  RCLCPP_INFO(node_->get_logger(), "Finished evaluating ESDF map.\n"
+            "\nRMSE:           %f\nMAE:            %f"
+            "\nTotal evaluated:     %lu\n", rms, mae, total_evaluated_voxels);
 
   eval_esdf_timer.Stop();
   occ_ptcloud.reset(new pcl::PointCloud<pcl::PointXYZ>());
@@ -510,16 +511,17 @@ void VoxedtServer::newPoseCallback(const Transformation& T_G_C) {
 //   block_remove_timer.Stop();
 // }
 
-void VoxedtServer::esdfMapCallback(const voxblox_msgs::Layer& layer_msg) {
+void VoxedtServer::esdfMapCallback(
+    const voxblox_msgs::msg::Layer::SharedPtr layer_msg) {
   timing::Timer receive_map_timer("map/receive_esdf");
 
   bool success =
       deserializeMsgToLayer<EsdfVoxel>(layer_msg, esdf_map_->getEsdfLayerPtr());
 
   if (!success) {
-    ROS_ERROR_THROTTLE(10, "Got an invalid ESDF map message!");
+    RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 10000, "Got an invalid ESDF map message!");
   } else {
-    ROS_INFO_ONCE("Got an ESDF map from ROS topic!");
+    RCLCPP_INFO_ONCE(node_->get_logger(), "Got an ESDF map from ROS topic!");
     if (publish_pointclouds_) {
       publishPointclouds();
     }

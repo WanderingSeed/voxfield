@@ -3,77 +3,99 @@
 #include <OGRE/OgreSceneManager.h>
 #include <OGRE/OgreSceneNode.h>
 
-#include <rviz/visualization_manager.h>
-#include <tf/transform_listener.h>
+#include <rviz_common/display_context.hpp>
+#include <rviz_common/frame_manager_iface.hpp>
+#include <rviz_common/properties/bool_property.hpp>
+#include <rviz_common/properties/status_property.hpp>
+#include <rviz_common/ros_integration/ros_node_abstraction.hpp>
+#include <rviz_common/visualization_manager.hpp>
 #include <voxblox_rviz_plugin/material_loader.h>
 
 namespace voxblox_rviz_plugin {
 
-VoxbloxMeshDisplay::VoxbloxMeshDisplay()
-    : visible_property_(
-          "Visible", true,
-          "Show or hide the mesh. If the mesh is hidden but not disabled, it "
-          "will persist and is incrementally built in the background.",
-          this, SLOT(visibleSLOT())) {
+VoxbloxMeshDisplay::VoxbloxMeshDisplay() {
   voxblox_rviz_plugin::MaterialLoader::loadMaterials();
+}
+
+void VoxbloxMeshDisplay::onInitialize() {
+  MFDClass::onInitialize();
+
+  visible_property_ = new rviz_common::properties::BoolProperty(
+      "Visible", true,
+      "Show or hide the mesh. If the mesh is hidden but not disabled, it "
+      "will persist and is incrementally built in the background.",
+      this, SLOT(visibleSLOT()));
+
+  visual_.reset(
+      new VoxbloxMeshVisual(context_, scene_node_));
+  visual_->setEnabled(visible_property_->getBool());
+
+  connect(context_->getFrameManager(), &rviz_common::FrameManagerIface::fixedFrameChanged,
+          this, &VoxbloxMeshDisplay::onFixedFrameChanged);
 }
 
 void VoxbloxMeshDisplay::reset() {
   MFDClass::reset();
-  visual_.reset();
+  if (visual_) {
+    visual_->reset();
+  }
 }
 
 void VoxbloxMeshDisplay::visibleSLOT() {
   if (visual_) {
-    // Set visibility and update the pose if visibility is turned on.
-    visual_->setEnabled(visible_property_.getBool());
-    if (visible_property_.getBool()) {
-      updateTransformation(ros::Time::now());
+    visual_->setEnabled(visible_property_->getBool());
+    if (visible_property_->getBool()) {
+      // Create an empty mesh message to trigger the transformation update
+      auto msg = std::make_shared<voxblox_msgs::msg::Mesh>();
+      msg->header.frame_id = fixed_frame_.toStdString();
+      msg->header.stamp = context_->getClock()->now();
+      updateTransformation(msg);
     }
   }
 }
 
 void VoxbloxMeshDisplay::processMessage(
-    const voxblox_msgs::Mesh::ConstPtr& msg) {
+    voxblox_msgs::msg::Mesh::ConstSharedPtr msg) {
   if (!visual_) {
-    visual_.reset(
-        new VoxbloxMeshVisual(context_->getSceneManager(), scene_node_));
-    visual_->setEnabled(visible_property_.getBool());
+    return;
   }
 
-  // update the frame, pose and mesh of the visual
-  visual_->setFrameId(msg->header.frame_id);
-  if (updateTransformation(msg->header.stamp)) {
+  if (updateTransformation(msg)) {
     visual_->setMessage(msg);
+    setStatus(rviz_common::properties::StatusProperty::Ok, "Transform", "Ok");
+  } else {
+    std::string error_message = "Could not transform from [" +
+                              msg->header.frame_id + "] to Fixed Frame [" +
+                              fixed_frame_.toStdString() + "]";
+    setStatus(rviz_common::properties::StatusProperty::Error, "Transform",
+              QString::fromStdString(error_message));
   }
 }
 
-bool VoxbloxMeshDisplay::updateTransformation(ros::Time stamp) {
+bool VoxbloxMeshDisplay::updateTransformation(voxblox_msgs::msg::Mesh::ConstSharedPtr msg) {
   if (!visual_) {
-    // can not get the transform if we don't have a visual
     return false;
   }
-  // Look up the transform from tf. If it doesn't work we have to skip.
   Ogre::Quaternion orientation;
   Ogre::Vector3 position;
-  if (!context_->getFrameManager()->getTransform(
-          visual_->getFrameId(), stamp, position, orientation)) {
-    ROS_DEBUG(
-        "Error transforming from frame '%s' to frame '%s'",
-        visual_->getFrameId().c_str(), qPrintable(fixed_frame_));
+  if (!context_->getFrameManager()->getTransform(msg->header.frame_id, msg->header.stamp,
+                                                position, orientation)) {
+    RCLCPP_DEBUG(this->context_->getRosNodeAbstraction().lock()->get_raw_node()->get_logger(),
+                 "Error transforming from frame '%s' to frame '%s'",
+                 msg->header.frame_id.c_str(), qPrintable(fixed_frame_));
     return false;
   }
-  visual_->setPose(position, orientation);
+  visual_->setFramePosition(position);
+  visual_->setFrameOrientation(orientation);
   return true;
 }
 
-void VoxbloxMeshDisplay::fixedFrameChanged() {
-  tf_filter_->setTargetFrame(fixed_frame_.toStdString());
-  // update the transformation of the visuals w.r.t fixed frame
-  updateTransformation(ros::Time::now());
+void VoxbloxMeshDisplay::onFixedFrameChanged() {
+  // The transformation will be updated when the next message is processed.
 }
 
 }  // namespace voxblox_rviz_plugin
 
-#include <pluginlib/class_list_macros.h>
-PLUGINLIB_EXPORT_CLASS(voxblox_rviz_plugin::VoxbloxMeshDisplay, rviz::Display)
+#include <pluginlib/class_list_macros.hpp>
+PLUGINLIB_EXPORT_CLASS(voxblox_rviz_plugin::VoxbloxMeshDisplay,
+                       rviz_common::Display)

@@ -4,8 +4,9 @@
 #include <functional>
 #include <string>
 
-#include <interactive_markers/interactive_marker_server.h>
-#include <visualization_msgs/InteractiveMarkerFeedback.h>
+#include <rclcpp/rclcpp.hpp>
+#include <interactive_markers/interactive_marker_server.hpp>
+#include <visualization_msgs/msg/interactive_marker_feedback.hpp>
 
 #include <voxblox/core/common.h>
 
@@ -17,7 +18,7 @@ class InteractiveSlider {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   InteractiveSlider(
-      const std::string& slider_name,
+      rclcpp::Node::SharedPtr node, const std::string& slider_name,
       const std::function<void(const double& slice_level)>& slider_callback,
       const Point& initial_position, const unsigned int free_plane_index,
       const float marker_scale_meters);
@@ -25,11 +26,13 @@ class InteractiveSlider {
 
  private:
   const unsigned int free_plane_index_;
-  interactive_markers::InteractiveMarkerServer interactive_marker_server_;
+  std::unique_ptr<interactive_markers::InteractiveMarkerServer>
+      interactive_marker_server_;
 
   /// Processes the feedback after moving the slider.
   virtual void interactiveMarkerFeedback(
-      const visualization_msgs::InteractiveMarkerFeedbackConstPtr& feedback,
+      const visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr&
+          feedback,
       const std::function<void(const double slice_level)>& slider_callback);
 };
 

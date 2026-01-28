@@ -4,7 +4,10 @@
 #include <memory>
 #include <string>
 
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <voxblox_msgs/msg/layer.hpp>
+#include <voxblox_msgs/msg/mesh.hpp>
 
 #include <voxblox/core/esdf_map.h>
 #include <voxblox/core/tsdf_map.h>
@@ -24,15 +27,8 @@ namespace voxblox {
 
 class SimulationServer {
  public:
-  SimulationServer(
-      const ros::NodeHandle& nh, const ros::NodeHandle& nh_private);
-
-  SimulationServer(
-      const ros::NodeHandle& nh, const ros::NodeHandle& nh_private,
-      const EsdfMap::Config& esdf_config,
-      const EsdfIntegrator::Config& esdf_integrator_config,
-      const TsdfMap::Config& tsdf_config,
-      const TsdfIntegratorBase::Config& tsdf_integrator_config);
+    // ROS2 constructor
+    SimulationServer(const rclcpp::Node::SharedPtr& node);
 
   virtual ~SimulationServer() {}
 
@@ -52,25 +48,21 @@ class SimulationServer {
   void visualize();
 
  protected:
-  void getServerConfigFromRosParam(const ros::NodeHandle& nh_private);
 
   /// Convenience function to generate valid viewpoints.
   bool generatePlausibleViewpoint(
       FloatingPoint min_distance, Point* ray_origin,
       Point* ray_direction) const;
 
-  ros::NodeHandle nh_;
-  ros::NodeHandle nh_private_;
-
-  // A bunch of publishers :)
-  ros::Publisher sim_pub_;
-  ros::Publisher tsdf_gt_pub_;
-  ros::Publisher esdf_gt_pub_;
-  ros::Publisher tsdf_gt_mesh_pub_;
-  ros::Publisher tsdf_test_pub_;
-  ros::Publisher esdf_test_pub_;
-  ros::Publisher tsdf_test_mesh_pub_;
-  ros::Publisher view_ptcloud_pub_;
+  rclcpp::Publisher<voxblox_msgs::msg::Mesh>::SharedPtr sim_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr tsdf_gt_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_gt_pub_;
+  rclcpp::Publisher<voxblox_msgs::msg::Mesh>::SharedPtr tsdf_gt_mesh_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr tsdf_test_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_test_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr tsdf_test_mesh_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr view_ptcloud_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr sdf_slice_pub_;
 
   // Settings
   FloatingPoint voxel_size_;
@@ -105,11 +97,14 @@ class SimulationServer {
   std::unique_ptr<Layer<EsdfVoxel> > esdf_test_;
   std::unique_ptr<Layer<OccupancyVoxel> > occ_test_;
 
-  // Integrators:
-  std::unique_ptr<TsdfIntegratorBase> tsdf_integrator_;
-  std::unique_ptr<EsdfIntegrator> esdf_integrator_;
-  std::unique_ptr<OccupancyIntegrator> occ_integrator_;
-  std::unique_ptr<EsdfOccIntegrator> esdf_occ_integrator_;
+  // ROS2 node pointer (optional, used during staged migration).
+  rclcpp::Node::SharedPtr node_;
+
+  // Integrators.
+  std::shared_ptr<TsdfIntegratorBase> tsdf_integrator_;
+  std::shared_ptr<OccupancyIntegrator> occ_integrator_;
+  std::shared_ptr<EsdfIntegrator> esdf_integrator_;
+  std::shared_ptr<EsdfOccIntegrator> esdf_occ_integrator_;
 };
 
 }  // namespace voxblox

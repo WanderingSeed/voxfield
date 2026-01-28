@@ -6,14 +6,14 @@
 #include <vector>
 
 #include <pcl/point_types.h>
-#include <pcl_ros/point_cloud.h>
-#include <std_msgs/ColorRGBA.h>
-
+#include <pcl/point_cloud.h>
+#include <std_msgs/msg/color_rgba.hpp>
+#include <pcl_conversions/pcl_conversions.h>
 #include <voxblox/core/common.h>
 #include <voxblox/core/layer.h>
 #include <voxblox/mesh/mesh.h>
 #include <voxblox/utils/color_maps.h>
-#include <voxblox_msgs/Layer.h>
+#include <voxblox_msgs/msg/layer.hpp>
 
 namespace voxblox {
 
@@ -24,7 +24,7 @@ enum class MapDerializationAction : uint8_t {
 };
 
 inline void colorVoxbloxToMsg(
-    const Color& color, std_msgs::ColorRGBA* color_msg) {
+    const Color& color, std_msgs::msg::ColorRGBA* color_msg) {
   CHECK_NOTNULL(color_msg);
   color_msg->r = color.r / 255.0;
   color_msg->g = color.g / 255.0;
@@ -33,7 +33,7 @@ inline void colorVoxbloxToMsg(
 }
 
 inline void colorMsgToVoxblox(
-    const std_msgs::ColorRGBA& color_msg, Color* color) {
+    const std_msgs::msg::ColorRGBA& color_msg, Color* color) {
   CHECK_NOTNULL(color);
   color->r = static_cast<uint8_t>(color_msg.r * 255.0);
   color->g = static_cast<uint8_t>(color_msg.g * 255.0);
@@ -192,9 +192,9 @@ inline void convertPointcloud(
 // Declarations
 template <typename VoxelType>
 void serializeLayerAsMsg(
-    const Layer<VoxelType>& layer, const bool only_updated,
-    voxblox_msgs::Layer* msg,
-    const MapDerializationAction& action = MapDerializationAction::kUpdate);
+  const Layer<VoxelType>& layer, const bool only_updated,
+  voxblox_msgs::msg::Layer* msg,
+  const MapDerializationAction& action = MapDerializationAction::kUpdate);
 
 /**
  * Returns true if could parse the data into the existing layer (all parameters
@@ -204,12 +204,12 @@ void serializeLayerAsMsg(
  */
 template <typename VoxelType>
 bool deserializeMsgToLayer(
-    const voxblox_msgs::Layer& msg, Layer<VoxelType>* layer);
+  const voxblox_msgs::msg::Layer::SharedPtr msg, Layer<VoxelType>* layer);
 
 template <typename VoxelType>
 bool deserializeMsgToLayer(
-    const voxblox_msgs::Layer& msg, const MapDerializationAction& action,
-    Layer<VoxelType>* layer);
+  const voxblox_msgs::msg::Layer::SharedPtr msg, const MapDerializationAction& action,
+  Layer<VoxelType>* layer);
 
 }  // namespace voxblox
 

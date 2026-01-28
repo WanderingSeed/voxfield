@@ -3,36 +3,46 @@
 
 #include <memory>
 
-#include <rviz/message_filter_display.h>
-#include <voxblox_msgs/Mesh.h>
+#include <voxblox_msgs/msg/mesh.hpp>
 
 #include "voxblox_rviz_plugin/voxblox_mesh_visual.h"
+
+#include <rviz_common/message_filter_display.hpp>
+#include <rclcpp/time.hpp>
+
+namespace rviz_common {
+namespace properties {
+class BoolProperty;
+}
+}  // namespace rviz_common
 
 namespace voxblox_rviz_plugin {
 
 class VoxbloxMeshVisual;
 
 class VoxbloxMeshDisplay
-    : public rviz::MessageFilterDisplay<voxblox_msgs::Mesh> {
+    : public rviz_common::MessageFilterDisplay<voxblox_msgs::msg::Mesh> {
   Q_OBJECT
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   VoxbloxMeshDisplay();
-  virtual ~VoxbloxMeshDisplay() = default;
+  ~VoxbloxMeshDisplay() override = default;
 
  protected:
+  void onInitialize() override;
   void reset() override;
-  void fixedFrameChanged() override;
+
+ private Q_SLOTS:
+  void visibleSLOT();
+  void onFixedFrameChanged();
 
  private:
-  void processMessage(const voxblox_msgs::Mesh::ConstPtr& msg) override;
-  bool updateTransformation(ros::Time stamp);
+  void processMessage(voxblox_msgs::msg::Mesh::ConstSharedPtr msg) override;
+  virtual bool updateTransformation(voxblox_msgs::msg::Mesh::ConstSharedPtr msg);
 
   std::unique_ptr<VoxbloxMeshVisual> visual_;
 
-  // Allows the user to still clear the mesh by clicking this property
-  rviz::BoolProperty visible_property_;
-  Q_SLOT void visibleSLOT();
+  rviz_common::properties::BoolProperty* visible_property_;
 };
 
 }  // namespace voxblox_rviz_plugin

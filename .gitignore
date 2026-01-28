@@ -1,5 +1,5 @@
-devel/
-logs/
+install/
+log/
 build/
 bin/
 lib/
@@ -49,3 +49,20 @@ qtcreator-*
 
 # Catkin custom files
 CATKIN_IGNORE
+log/COLCON_IGNORE
+log/latest
+log/latest_build
+log/build_2026-01-22_17-48-35/events.log
+log/build_2026-01-22_17-48-35/logger_all.log
+log/build_2026-01-22_17-48-35/voxblox/command.log
+log/build_2026-01-22_17-48-35/voxblox/stderr.log
+log/build_2026-01-22_17-48-35/voxblox/stdout_stderr.log
+log/build_2026-01-22_17-48-35/voxblox/stdout.log
+log/build_2026-01-22_17-48-35/voxblox/streams.log
+log/build_2026-01-22_18-35-52/events.log
+log/build_2026-01-22_18-35-52/logger_all.log
+log/build_2026-01-22_18-35-52/voxblox_msgs/command.log
+log/build_2026-01-22_18-35-52/voxblox_msgs/stderr.log
+log/build_2026-01-22_18-35-52/voxblox_msgs/stdout_stderr.log
+log/build_2026-01-22_18-35-52/voxblox_msgs/stdout.log
+log/build_2026-01-22_18-35-52/voxblox_msgs/streams.log

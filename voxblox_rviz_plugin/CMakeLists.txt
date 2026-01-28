@@ -1,74 +1,83 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(voxblox_rviz_plugin)
 
-find_package(catkin_simple REQUIRED)
-catkin_simple(ALL_DEPS_REQUIRED)
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_auto REQUIRED)
+find_package(Qt5 REQUIRED COMPONENTS Core Widgets)
+find_package(rviz_common REQUIRED)
+find_package(rviz_rendering REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(voxblox_msgs REQUIRED)
+find_package(voxblox REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rviz_ogre_vendor REQUIRED)
 
-set(CMAKE_MACOSX_RPATH 0)
-add_definitions(-std=c++11 -Wall)
-
-## This setting causes Qt's "MOC" generation to happen automatically.
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-## This plugin includes Qt widgets, so we must include Qt.
-## We'll use the version that rviz used so they are compatible.
-if(rviz_QT_VERSION VERSION_LESS "5")
-  message(STATUS "Using Qt4 based on the rviz_QT_VERSION: ${rviz_QT_VERSION}")
-  find_package(Qt4 ${rviz_QT_VERSION} EXACT REQUIRED QtCore QtGui)
-  ## pull in all required include dirs, define QT_LIBRARIES, etc.
-  include(${QT_USE_FILE})
-  qt4_wrap_cpp(MOC_FILES
-    ${INCLUDE_FILES_QT}
-  )
-else()
-  message(STATUS "Using Qt5 based on the rviz_QT_VERSION: ${rviz_QT_VERSION}")
-  find_package(Qt5 ${rviz_QT_VERSION} EXACT REQUIRED Core Widgets)
-  ## make target_link_libraries(${QT_LIBRARIES}) pull in all required dependencies
-  set(QT_LIBRARIES Qt5::Widgets)
-  QT5_WRAP_CPP(MOC_FILES
-    ${INCLUDE_FILES_QT}
-  )
-endif()
-
-## Avoid Qt signals and slots defining "emit", "slots", etc.
-add_definitions(-DQT_NO_KEYWORDS)
-
-set(HEADER_FILES
-        include/voxblox_rviz_plugin/voxblox_mesh_display.h
-        include/voxblox_rviz_plugin/voxblox_multi_mesh_display.h
-        include/voxblox_rviz_plugin/voxblox_mesh_visual.h
-        include/voxblox_rviz_plugin/material_loader.h
-        )
+add_compile_definitions(QT_NO_KEYWORDS)
 
 set(SRC_FILES
-        src/voxblox_mesh_display.cc
-        src/voxblox_multi_mesh_display.cc
-        src/voxblox_mesh_visual.cc
-        src/material_loader.cc
-        )
-
-cs_add_library(${PROJECT_NAME}
-  ${SRC_FILES}
-  ${HEADER_FILES}
-  ${MOC_FILES}
+    src/voxblox_mesh_display.cc
+    src/voxblox_multi_mesh_display.cc
+    src/voxblox_mesh_visual.cc
+    src/material_loader.cc
 )
 
-target_link_libraries(${PROJECT_NAME}
-  ${QT_LIBRARIES}
+add_library(${PROJECT_NAME} SHARED
+    ${SRC_FILES}
 )
 
+ament_target_dependencies(${PROJECT_NAME} PUBLIC
+    rviz_common
+    rviz_rendering
+    rviz_ogre_vendor
+    pluginlib
+    rclcpp
+    voxblox
+    voxblox_msgs
+)
 
-##########
-# EXPORT #
-##########
+target_include_directories(${PROJECT_NAME} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+# Force our includes to the front to avoid picking up system Ogre
+target_include_directories(${PROJECT_NAME} BEFORE PUBLIC
+    ${rviz_ogre_vendor_INCLUDE_DIRS}
+)
+
+target_link_libraries(${PROJECT_NAME} PUBLIC
+    Qt5::Core
+    Qt5::Widgets
+    ${rviz_ogre_vendor_LIBRARIES}
+)
+
+pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
 
 install(
-  FILES plugin_description.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+    TARGETS ${PROJECT_NAME}
+    EXPORT export_${PROJECT_NAME}
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+)
 
 install(
-  DIRECTORY icons/
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/icons)
+    DIRECTORY include/
+    DESTINATION include
+)
 
-cs_install()
-cs_export()
+install(
+    FILES plugin_description.xml
+    DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+    DIRECTORY icons/
+    DESTINATION share/${PROJECT_NAME}/icons
+)
+
+ament_package()

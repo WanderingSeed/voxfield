@@ -3,13 +3,14 @@
 
 #include <memory>
 #include <string>
-
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp/timer.hpp>
 #include <voxblox/core/esdf_map.h>
 #include <voxblox/core/occupancy_map.h>
 #include <voxblox/integrator/esdf_occ_edt_integrator.h>
 #include <voxblox/integrator/esdf_occ_fiesta_integrator.h>
 #include <voxblox/integrator/occupancy_tsdf_integrator.h>
-#include <voxblox_msgs/Layer.h>
+#include <voxblox_msgs/msg/layer.hpp>
 
 #include "voxblox_ros/tsdf_server.h"
 
@@ -19,9 +20,10 @@ class VoxedtServer : public TsdfServer {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-  VoxedtServer(const ros::NodeHandle& nh, const ros::NodeHandle& nh_private);
+  // ROS2 constructor
+  VoxedtServer(const rclcpp::Node::SharedPtr& node);
   VoxedtServer(
-      const ros::NodeHandle& nh, const ros::NodeHandle& nh_private,
+      const rclcpp::Node::SharedPtr& nh,
       const EsdfMap::Config& esdf_config,
       const EsdfOccEdtIntegrator::Config& esdf_integrator_config,
       const TsdfMap::Config& tsdf_config,
@@ -47,9 +49,9 @@ class VoxedtServer : public TsdfServer {
   virtual bool loadMap(const std::string& file_path);
 
   /// Timer events
-  void updateEsdfEvent(const ros::TimerEvent& event);
+  void updateEsdfEvent();
 
-  void evalEsdfEvent(const ros::TimerEvent& event);
+  void evalEsdfEvent();
 
   /// Call this to update the ESDF based on latest state of the occupancy map,
   /// considering only the newly updated parts of the occupancy map (checked
@@ -66,7 +68,7 @@ class VoxedtServer : public TsdfServer {
   void evalEsdfRefOcc();
 
   // Overwrites the layer with what's coming from the topic!
-  void esdfMapCallback(const voxblox_msgs::Layer& layer_msg);
+  void esdfMapCallback(const std::shared_ptr<voxblox_msgs::msg::Layer> layer_msg);
 
   inline std::shared_ptr<EsdfMap> getEsdfMapPtr() {
     return esdf_map_;
@@ -75,21 +77,22 @@ class VoxedtServer : public TsdfServer {
     return esdf_map_;
   }
 
-  bool saveEsdfMapCallback(
-      voxblox_msgs::FilePath::Request& request,     // NOLINT
-      voxblox_msgs::FilePath::Response& response);  // NOLINT
+  void saveEsdfMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,     // NOLINT
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response);  // NOLINT
 
-  bool saveOccMapCallback(
-      voxblox_msgs::FilePath::Request& request,     // NOLINT
-      voxblox_msgs::FilePath::Response& response);  // NOLINT
+  void saveOccMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,     // NOLINT
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response);  // NOLINT
 
-  bool saveAllMapCallback(
-      voxblox_msgs::FilePath::Request& request,     // NOLINT
-      voxblox_msgs::FilePath::Response& response);  // NOLINT
+  void saveAllMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,     // NOLINT
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response);  // NOLINT
 
   bool getClearSphere() const {
     return clear_sphere_for_planning_;
   }
+  
   void setClearSphere(bool clear_sphere_for_planning) {
     clear_sphere_for_planning_ = clear_sphere_for_planning;
   }
@@ -118,27 +121,21 @@ class VoxedtServer : public TsdfServer {
   /// constructor.
   void setupRos();
 
-  /// Publish markers for visualization.
-  ros::Publisher esdf_pointcloud_pub_;
-  ros::Publisher esdf_slice_pub_;
-  ros::Publisher esdf_error_slice_pub_;
-  ros::Publisher traversable_pub_;
+  rclcpp::Publisher<voxblox_msgs::msg::Layer>::SharedPtr esdf_map_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_pointcloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_slice_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr traversable_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_error_slice_pub_;
 
-  /// Publish the complete map for other nodes to consume.
-  ros::Publisher esdf_map_pub_;
+  rclcpp::Subscription<voxblox_msgs::msg::Layer>::SharedPtr esdf_map_sub_;
 
-  /// Subscriber to subscribe to another node generating the map.
-  ros::Subscriber esdf_map_sub_;
+  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr generate_esdf_srv_;
+  rclcpp::Service<voxblox_msgs::srv::FilePath>::SharedPtr save_esdf_map_srv_;
+  rclcpp::Service<voxblox_msgs::srv::FilePath>::SharedPtr save_occ_map_srv_;
+  rclcpp::Service<voxblox_msgs::srv::FilePath>::SharedPtr save_all_map_srv_;
 
-  /// Services.
-  ros::ServiceServer generate_esdf_srv_;
-  ros::ServiceServer save_esdf_map_srv_;
-  ros::ServiceServer save_occ_map_srv_;
-  ros::ServiceServer save_all_map_srv_;
-
-  /// Timers.
-  ros::Timer update_esdf_timer_;
-  ros::Timer eval_esdf_timer_;
+  rclcpp::TimerBase::SharedPtr update_esdf_timer_;
+  rclcpp::TimerBase::SharedPtr eval_esdf_timer_;
 
   bool clear_sphere_for_planning_;
   bool publish_esdf_map_;

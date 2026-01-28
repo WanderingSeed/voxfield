@@ -2,26 +2,23 @@
 
 #include <minkindr_conversions/kindr_msg.h>
 #include <minkindr_conversions/kindr_tf.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 #include "voxblox_ros/conversions.h"
 #include "voxblox_ros/ros_params.h"
-
 namespace voxblox {
 
-NpTsdfServer::NpTsdfServer(
-    const ros::NodeHandle& nh, const ros::NodeHandle& nh_private)
+NpTsdfServer::NpTsdfServer(const rclcpp::Node::SharedPtr& node)
     : NpTsdfServer(
-          nh, nh_private, getTsdfMapConfigFromRosParam(nh_private),
-          getNpTsdfIntegratorConfigFromRosParam(nh_private),
-          getMeshIntegratorConfigFromRosParam(nh_private)) {}
+          node, getTsdfMapConfigFromRosParam(node),
+          getNpTsdfIntegratorConfigFromRosParam(node),
+          getMeshIntegratorConfigFromRosParam(node)) {}
 
 NpTsdfServer::NpTsdfServer(
-    const ros::NodeHandle& nh, const ros::NodeHandle& nh_private,
-    const TsdfMap::Config& config,
-    const NpTsdfIntegratorBase::Config& integrator_config,  // NOLINT
+    const rclcpp::Node::SharedPtr& node, const TsdfMap::Config& config,
+    const NpTsdfIntegratorBase::Config& integrator_config,
     const MeshIntegratorConfig& mesh_config)
-    : nh_(nh),
-      nh_private_(nh_private),
+    : node_(node),
       verbose_(true),
       world_frame_("world"),
       icp_corrected_frame_("icp_corrected"),
@@ -39,67 +36,72 @@ NpTsdfServer::NpTsdfServer(
       accumulate_icp_corrections_(true),
       pointcloud_queue_size_(1),
       num_subscribers_tsdf_map_(0),
-      transformer_(nh, nh_private) {
-  getServerConfigFromRosParam(nh_private);
+      transformer_(node),
+      last_msg_time_ptcloud_(0, 0),
+      last_msg_time_freespace_ptcloud_(0, 0),
+      min_time_between_msgs_(rclcpp::Duration::from_seconds(0.0))  {
+  // Get general parameters.
+  getServerConfigFromRosParam(node);
 
   // Advertise topics.
   surface_pointcloud_pub_ =
-      nh_private_.advertise<pcl::PointCloud<pcl::PointXYZRGB> >(
-          "surface_pointcloud", 1, true);
+      node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+          "surface_pointcloud", rclcpp::QoS(1).transient_local());
   tsdf_pointcloud_pub_ =
-      nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-          "tsdf_pointcloud", 1, true);
+      node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+          "tsdf_pointcloud", rclcpp::QoS(1).transient_local());
   gsdf_pointcloud_pub_ =
-      nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-          "gsdf_pointcloud", 1, true);
+      node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+          "gsdf_pointcloud", rclcpp::QoS(1).transient_local());
   occupancy_marker_pub_ =
-      nh_private_.advertise<visualization_msgs::MarkerArray>(
-          "occupied_nodes", 1, true);
-  tsdf_slice_pub_ = nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-      "tsdf_slice", 1, true);
-  gsdf_slice_pub_ = nh_private_.advertise<pcl::PointCloud<pcl::PointXYZI> >(
-      "gsdf_slice", 1, true);
+      node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+          "occupied_nodes", rclcpp::QoS(1).transient_local());
+  tsdf_slice_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "tsdf_slice", rclcpp::QoS(1).transient_local());
+  gsdf_slice_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "gsdf_slice", rclcpp::QoS(1).transient_local());
+  pointcloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+      "pointcloud", rclcpp::SensorDataQoS(),
+      std::bind(&NpTsdfServer::insertPointcloud, this, std::placeholders::_1));
 
-  nh_private_.param(
-      "pointcloud_queue_size", pointcloud_queue_size_, pointcloud_queue_size_);
-  pointcloud_sub_ = nh_.subscribe(
-      "pointcloud", pointcloud_queue_size_, &NpTsdfServer::insertPointcloud,
-      this);
+  mesh_pub_ = node_->create_publisher<voxblox_msgs::msg::Mesh>(
+      "mesh", rclcpp::QoS(1).transient_local());
 
-  mesh_pub_ = nh_private_.advertise<voxblox_msgs::Mesh>("mesh", 1, true);
+  tsdf_map_pub_ = node_->create_publisher<voxblox_msgs::msg::Layer>(
+      "tsdf_map_out", rclcpp::QoS(1));
+  tsdf_map_sub_ = node_->create_subscription<voxblox_msgs::msg::Layer>(
+      "tsdf_map_in", rclcpp::QoS(1),
+      std::bind(&NpTsdfServer::tsdfMapCallback, this, std::placeholders::_1));
 
-  // Publishing/subscribing to a layer from another node (when using this as
-  // a library, for example within a planner).
-  tsdf_map_pub_ =
-      nh_private_.advertise<voxblox_msgs::Layer>("tsdf_map_out", 1, false);
-  tsdf_map_sub_ = nh_private_.subscribe(
-      "tsdf_map_in", 1, &NpTsdfServer::tsdfMapCallback, this);
-  robot_model_pub_ =
-      nh_private_.advertise<visualization_msgs::Marker>("Robot_model", 100);
-  nh_private_.param("publish_tsdf_map", publish_tsdf_map_, publish_tsdf_map_);
+  if (publish_robot_model_) {
+    robot_model_pub_ =
+        node_->create_publisher<visualization_msgs::msg::Marker>(
+            "robot_model", rclcpp::QoS(100));
+  }
 
   if (use_freespace_pointcloud_) {
-    // points that are not inside an object, but may also not be on a surface.
-    // These will only be used to mark freespace beyond the truncation distance.
-    freespace_pointcloud_sub_ = nh_.subscribe(
-        "freespace_pointcloud", pointcloud_queue_size_,
-        &NpTsdfServer::insertFreespacePointcloud, this);
+    freespace_pointcloud_sub_ =
+        node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "freespace_pointcloud", rclcpp::SensorDataQoS(),
+            std::bind(&NpTsdfServer::insertFreespacePointcloud, this,
+                      std::placeholders::_1));
   }
 
   if (enable_icp_) {
-    icp_transform_pub_ = nh_private_.advertise<geometry_msgs::TransformStamped>(
-        "icp_transform", 1, true);
-    nh_private_.param(
-        "icp_corrected_frame", icp_corrected_frame_, icp_corrected_frame_);
-    nh_private_.param(
-        "pose_corrected_frame", pose_corrected_frame_, pose_corrected_frame_);
+    icp_transform_pub_ =
+        node_->create_publisher<geometry_msgs::msg::TransformStamped>(
+            "icp_transform", rclcpp::QoS(1).transient_local());
+    icp_corrected_frame_ =
+        node_->declare_parameter("icp_corrected_frame", icp_corrected_frame_);
+    pose_corrected_frame_ =
+        node_->declare_parameter("pose_corrected_frame", pose_corrected_frame_);
   }
 
   // Initialize TSDF Map and integrator.
   tsdf_map_.reset(new TsdfMap(config));
 
   std::string method("merged");
-  nh_private_.param("method", method, method);
+  method = node_->declare_parameter("method", method);
   if (method.compare("simple") == 0) {
     tsdf_integrator_.reset(new SimpleNpTsdfIntegrator(
         integrator_config, tsdf_map_->getTsdfLayerPtr()));
@@ -117,148 +119,148 @@ NpTsdfServer::NpTsdfServer(
   mesh_layer_.reset(new MeshLayer(tsdf_map_->block_size()));
   mesh_integrator_.reset(new MeshIntegrator<TsdfVoxel>(
       mesh_config, tsdf_map_->getTsdfLayerPtr(), mesh_layer_.get()));
-  icp_.reset(new ICP(getICPConfigFromRosParam(nh_private)));
+  icp_.reset(new ICP(getICPConfigFromRosParam(node_)));
 
   // Advertise services.
-  generate_mesh_srv_ = nh_private_.advertiseService(
-      "generate_mesh", &NpTsdfServer::generateMeshCallback, this);
-  clear_map_srv_ = nh_private_.advertiseService(
-      "clear_map", &NpTsdfServer::clearMapCallback, this);
-  save_map_srv_ = nh_private_.advertiseService(
-      "save_map", &NpTsdfServer::saveMapCallback, this);
-  load_map_srv_ = nh_private_.advertiseService(
-      "load_map", &NpTsdfServer::loadMapCallback, this);
-  publish_pointclouds_srv_ = nh_private_.advertiseService(
-      "publish_pointclouds", &NpTsdfServer::publishPointcloudsCallback, this);
-  publish_tsdf_map_srv_ = nh_private_.advertiseService(
-      "publish_map", &NpTsdfServer::publishTsdfMapCallback, this);
+  generate_mesh_srv_ = node_->create_service<std_srvs::srv::Empty>(
+      "generate_mesh",
+      std::bind(&NpTsdfServer::generateMeshCallback, this,
+                std::placeholders::_1, std::placeholders::_2));
+  clear_map_srv_ = node_->create_service<std_srvs::srv::Empty>(
+      "clear_map",
+      std::bind(&NpTsdfServer::clearMapCallback, this, std::placeholders::_1,
+                std::placeholders::_2));
+  save_map_srv_ = node_->create_service<voxblox_msgs::srv::FilePath>(
+      "save_map",
+      std::bind(&NpTsdfServer::saveMapCallback, this, std::placeholders::_1,
+                std::placeholders::_2));
+  load_map_srv_ = node_->create_service<voxblox_msgs::srv::FilePath>(
+      "load_map",
+      std::bind(&NpTsdfServer::loadMapCallback, this, std::placeholders::_1,
+                std::placeholders::_2));
+  publish_pointclouds_srv_ = node_->create_service<std_srvs::srv::Empty>(
+      "publish_pointclouds",
+      std::bind(&NpTsdfServer::publishPointcloudsCallback, this,
+                std::placeholders::_1, std::placeholders::_2));
+  publish_tsdf_map_srv_ = node_->create_service<std_srvs::srv::Empty>(
+      "publish_map",
+      std::bind(&NpTsdfServer::publishTsdfMapCallback, this,
+                std::placeholders::_1, std::placeholders::_2));
 
   // If set, use a timer to progressively integrate the mesh.
-  double update_mesh_every_n_sec = 1.0f;
-  nh_private_.param(
-      "update_mesh_every_n_sec", update_mesh_every_n_sec,
-      update_mesh_every_n_sec);
+  double update_mesh_every_n_sec = 1.0;
+  update_mesh_every_n_sec = node_->declare_parameter("update_mesh_every_n_sec",
+                                                     update_mesh_every_n_sec);
 
   if (update_mesh_every_n_sec > 0.0) {
-    update_mesh_timer_ = nh_private_.createTimer(
-        ros::Duration(update_mesh_every_n_sec), &NpTsdfServer::updateMeshEvent,
-        this);
+    update_mesh_timer_ = node_->create_wall_timer(
+        std::chrono::duration<double>(update_mesh_every_n_sec),
+        [this]() { this->updateMesh(); });
   } else {
     update_mesh_every_n_ = static_cast<int>(-1.0 * update_mesh_every_n_sec);
   }
 
   double publish_map_every_n_sec = 1.0;
-  nh_private_.param(
-      "publish_map_every_n_sec", publish_map_every_n_sec,
-      publish_map_every_n_sec);
+  publish_map_every_n_sec = node_->declare_parameter("publish_map_every_n_sec",
+                                                     publish_map_every_n_sec);
 
   if (publish_map_every_n_sec > 0.0) {
-    publish_map_timer_ = nh_private_.createTimer(
-        ros::Duration(publish_map_every_n_sec), &NpTsdfServer::publishMapEvent,
-        this);
+    publish_map_timer_ = node_->create_wall_timer(
+        std::chrono::duration<double>(publish_map_every_n_sec),
+        [this]() { this->publishMap(); });
   }
+
+  tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(*node_);
 }
 
 void NpTsdfServer::getServerConfigFromRosParam(
-    const ros::NodeHandle& nh_private) {
+    const rclcpp::Node::SharedPtr& node) {
   // Before subscribing, determine minimum time between messages.
   // 0 by default.
   double min_time_between_msgs_sec = 0.0;
-  nh_private.param(
-      "min_time_between_msgs_sec", min_time_between_msgs_sec,
-      min_time_between_msgs_sec);
-  min_time_between_msgs_.fromSec(min_time_between_msgs_sec);
+  min_time_between_msgs_sec = node_->declare_parameter(
+      "min_time_between_msgs_sec", min_time_between_msgs_sec);
+  min_time_between_msgs_ =
+      rclcpp::Duration::from_seconds(min_time_between_msgs_sec);
 
-  nh_private.param(
-      "max_block_distance_from_body", max_block_distance_from_body_,
-      max_block_distance_from_body_);
-  nh_private.param("slice_level", slice_level_, slice_level_);
-  nh_private.param("world_frame", world_frame_, world_frame_);
-  nh_private.param("sensor_frame", sensor_frame_, sensor_frame_);
-  nh_private.param(
-      "publish_pointclouds_on_update", publish_pointclouds_on_update_,
-      publish_pointclouds_on_update_);
-  nh_private.param("publish_slices", publish_slices_, publish_slices_);
-  nh_private.param(
-      "publish_pointclouds", publish_pointclouds_, publish_pointclouds_);
-  nh_private.param(
-      "use_freespace_pointcloud", use_freespace_pointcloud_,
-      use_freespace_pointcloud_);
-  nh_private.param(
-      "pointcloud_queue_size", pointcloud_queue_size_, pointcloud_queue_size_);
-  nh_private.param("enable_icp", enable_icp_, enable_icp_);
-  nh_private.param(
-      "accumulate_icp_corrections", accumulate_icp_corrections_,
-      accumulate_icp_corrections_);
-
-  // Logging
-  nh_private.param("verbose", verbose_, verbose_);
-  nh_private.param("timing", timing_, timing_);
-
-  // Sensor specific
-  nh_private_.param("sensor_is_lidar", sensor_is_lidar_, sensor_is_lidar_);
-  nh_private_.param("width", width_, width_);
-  nh_private_.param("height", height_, height_);
-  nh_private_.param(
-      "smooth_thre_ratio", smooth_thre_ratio_, smooth_thre_ratio_);
-  nh_private_.param(
-      "min_z", min_z_, min_z_);
-  nh_private_.param(
-      "min_dist", min_dist_, min_dist_);
+  max_block_distance_from_body_ = node_->declare_parameter(
+      "max_block_distance_from_body", max_block_distance_from_body_);
+  slice_level_ = node_->declare_parameter("slice_level", slice_level_);
+  world_frame_ = node_->declare_parameter("world_frame", world_frame_);
+  sensor_frame_ = node_->declare_parameter("sensor_frame", sensor_frame_);
+  publish_pointclouds_on_update_ = node_->declare_parameter(
+      "publish_pointclouds_on_update", publish_pointclouds_on_update_);
+  publish_slices_ = node_->declare_parameter("publish_slices", publish_slices_);
+  publish_pointclouds_ =
+      node_->declare_parameter("publish_pointclouds", publish_pointclouds_);
+  use_freespace_pointcloud_ = node_->declare_parameter(
+      "use_freespace_pointcloud", use_freespace_pointcloud_);
+  pointcloud_queue_size_ =
+      node_->declare_parameter("pointcloud_queue_size", pointcloud_queue_size_);
+  enable_icp_ = node_->declare_parameter("enable_icp", enable_icp_);
+  accumulate_icp_corrections_ = node_->declare_parameter(
+      "accumulate_icp_corrections", accumulate_icp_corrections_);
+  verbose_ = node_->declare_parameter("verbose", verbose_);
+  timing_ = node_->declare_parameter("timing", timing_);
+  sensor_is_lidar_ =
+      node_->declare_parameter("sensor_is_lidar", sensor_is_lidar_);
+  width_ = node_->declare_parameter("width", width_);
+  height_ = node_->declare_parameter("height", height_);
+  smooth_thre_ratio_ =
+      node_->declare_parameter("smooth_thre_ratio", smooth_thre_ratio_);
+  min_z_ = node_->declare_parameter("min_z", min_z_);
+  min_dist_ = node_->declare_parameter("min_dist", min_dist_);
 
   if (sensor_is_lidar_) {
-    nh_private_.param("fov_up", fov_up_, fov_up_);
-    nh_private_.param("fov_down", fov_down_, fov_down_);
+    fov_up_ = node_->declare_parameter("fov_up", fov_up_);
+    fov_down_ = node_->declare_parameter("fov_down", fov_down_);
     float fov = std::abs(fov_down_) + std::abs(fov_up_);
     fov_down_rad_ = fov_down_ / 180.0f * M_PI;
     fov_rad_ = fov / 180.0f * M_PI;
-  } else {
-    nh_private_.param("vx", vx_, vx_);
-    nh_private_.param("vy", vy_, vy_);
-    nh_private_.param("fx", fx_, fx_);
-    nh_private_.param("fy", fy_, fy_);
-  }
+} else {
+  vx_ = node_->declare_parameter("vx", vx_);
+  vy_ = node_->declare_parameter("vy", vy_);
+  fx_ = node_->declare_parameter("fx", fx_);
+  fy_ = node_->declare_parameter("fy", fy_);
+}
 
-  // Robot model related
-  nh_private_.param(
-      "publish_robot_model", publish_robot_model_, publish_robot_model_);
-  nh_private_.param("robot_model_file", robot_model_file_, robot_model_file_);
-  nh_private_.param(
-      "robot_model_scale", robot_model_scale_, robot_model_scale_);
+publish_robot_model_ =
+    node_->declare_parameter("publish_robot_model", publish_robot_model_);
+robot_model_file_ =
+    node_->declare_parameter("robot_model_file", robot_model_file_);
+robot_model_scale_ =
+    node_->declare_parameter("robot_model_scale", robot_model_scale_);
+mesh_filename_ = node_->declare_parameter("mesh_filename", mesh_filename_);
+std::string color_mode_str =
+    node_->declare_parameter("color_mode", std::string(""));
+color_mode_ = getColorModeFromString(color_mode_str);
 
-  // Mesh settings.
-  nh_private.param("mesh_filename", mesh_filename_, mesh_filename_);
-  std::string color_mode("");
-  nh_private.param("color_mode", color_mode, color_mode);
-  color_mode_ = getColorModeFromString(color_mode);
+std::string intensity_colormap = "rainbow";
+float intensity_max_value = kDefaultMaxIntensity;
+intensity_colormap =
+    node_->declare_parameter("intensity_colormap", intensity_colormap);
+intensity_max_value =
+    node_->declare_parameter("intensity_max_value", intensity_max_value);
 
-  // Color map for intensity pointclouds.
-  std::string intensity_colormap("rainbow");
-  float intensity_max_value = kDefaultMaxIntensity;
-  nh_private.param(
-      "intensity_colormap", intensity_colormap, intensity_colormap);
-  nh_private.param(
-      "intensity_max_value", intensity_max_value, intensity_max_value);
-
-  // Default set in constructor.
-  if (intensity_colormap == "rainbow") {
-    color_map_.reset(new RainbowColorMap());
-  } else if (intensity_colormap == "inverse_rainbow") {
-    color_map_.reset(new InverseRainbowColorMap());
-  } else if (intensity_colormap == "grayscale") {
-    color_map_.reset(new GrayscaleColorMap());
-  } else if (intensity_colormap == "inverse_grayscale") {
-    color_map_.reset(new InverseGrayscaleColorMap());
-  } else if (intensity_colormap == "ironbow") {
-    color_map_.reset(new IronbowColorMap());
-  } else {
-    ROS_ERROR_STREAM("Invalid color map: " << intensity_colormap);
-  }
-  color_map_->setMaxValue(intensity_max_value);
+if (intensity_colormap == "rainbow") {
+  color_map_.reset(new RainbowColorMap());
+} else if (intensity_colormap == "inverse_rainbow") {
+  color_map_.reset(new InverseRainbowColorMap());
+} else if (intensity_colormap == "grayscale") {
+  color_map_.reset(new GrayscaleColorMap());
+} else if (intensity_colormap == "inverse_grayscale") {
+  color_map_.reset(new InverseGrayscaleColorMap());
+} else if (intensity_colormap == "ironbow") {
+  color_map_.reset(new IronbowColorMap());
+} else {
+  RCLCPP_ERROR_STREAM(
+      node_->get_logger(), "Invalid color map: " << intensity_colormap);
+}
+color_map_->setMaxValue(intensity_max_value);
 }
 
 void NpTsdfServer::processPointCloudMessageAndInsert(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg,
+    const sensor_msgs::msg::PointCloud2::SharedPtr pointcloud_msg,
     const Transformation& T_G_C, const bool is_freespace_pointcloud) {
   timing::Timer ptcloud_timer("preprocess/input");
   // Convert the PCL pointcloud into our awesome format.
@@ -268,13 +270,12 @@ void NpTsdfServer::processPointCloudMessageAndInsert(
   bool has_label = false;
   for (size_t d = 0; d < pointcloud_msg->fields.size(); ++d) {
     if (pointcloud_msg->fields[d].name == std::string("rgb")) {
-      pointcloud_msg->fields[d].datatype = sensor_msgs::PointField::FLOAT32;
+      pointcloud_msg->fields[d].datatype = sensor_msgs::msg::PointField::FLOAT32;
       color_pointcloud = true;
     } else if (pointcloud_msg->fields[d].name == std::string("intensity")) {
       has_intensity = true;
     } else if (pointcloud_msg->fields[d].name == std::string("label")) {
       has_label = true;
-      // ROS_INFO("Found semantic/instance label in the point cloud");
     }
   }
 
@@ -285,13 +286,10 @@ void NpTsdfServer::processPointCloudMessageAndInsert(
 
   // Convert differently depending on RGB or I type.
   if (has_label) {
-    pcl::PointCloud<pcl::PointXYZRGBL>::Ptr pointcloud_pcl(
-        new pcl::PointCloud<pcl::PointXYZRGBL>());
-    // pointcloud_pcl is modified below:
-    pcl::fromROSMsg(*pointcloud_msg, *pointcloud_pcl);
-    convertPointcloud(
-        *pointcloud_pcl, color_map_, &points_C, &colors, &labels, true);
-    pointcloud_pcl.reset(new pcl::PointCloud<pcl::PointXYZRGBL>());
+    pcl::PointCloud<pcl::PointXYZRGBL> pointcloud_pcl;
+    pcl::fromROSMsg(*pointcloud_msg, pointcloud_pcl);
+    convertPointcloud(pointcloud_pcl, color_map_, &points_C, &colors, &labels,
+                      true);
   } else if (color_pointcloud) {
     pcl::PointCloud<pcl::PointXYZRGB> pointcloud_pcl;
     // pointcloud_pcl is modified below:
@@ -316,8 +314,8 @@ void NpTsdfServer::processPointCloudMessageAndInsert(
   cv::Mat vertex_map = cv::Mat::zeros(height_, width_, CV_32FC3);
   cv::Mat depth_image(vertex_map.size(), CV_32FC1, -1.0);
   cv::Mat color_image = cv::Mat::zeros(vertex_map.size(), CV_8UC3);
-  projectPointCloudToImage(
-      points_C, colors, vertex_map, depth_image, color_image, min_z_, min_dist_);
+  projectPointCloudToImage(points_C, colors, vertex_map, depth_image,
+                           color_image, min_z_, min_dist_);
   cv::Mat normal_image = computeNormalImage(vertex_map, depth_image);
   // Back project to point cloud from range images
   points_C = extractPointCloud(vertex_map, depth_image);
@@ -334,13 +332,13 @@ void NpTsdfServer::processPointCloudMessageAndInsert(
       icp_corrected_transform_.setIdentity();
     }
     static Transformation T_offset;
-    const size_t num_icp_updates = icp_->runICP(
-        tsdf_map_->getTsdfLayer(), points_C, icp_corrected_transform_ * T_G_C,
-        &T_G_C_refined);
+    const size_t num_icp_updates =
+        icp_->runICP(tsdf_map_->getTsdfLayer(), points_C,
+                     icp_corrected_transform_ * T_G_C, &T_G_C_refined);
     if (verbose_) {
-      ROS_INFO(
-          "ICP refinement performed %zu successful update steps",
-          num_icp_updates);
+      RCLCPP_INFO(node_->get_logger(),
+                  "ICP refinement performed %zu successful update steps",
+                  num_icp_updates);
     }
     icp_corrected_transform_ = T_G_C_refined * T_G_C.inverse();
 
@@ -353,44 +351,39 @@ void NpTsdfServer::processPointCloudMessageAndInsert(
       icp_corrected_transform_ = Transformation::exp(T_vec);
     }
 
-    // Publish transforms as both TF and message.
-    tf::Transform icp_tf_msg, pose_tf_msg;
-    geometry_msgs::TransformStamped transform_msg;
+    geometry_msgs::msg::TransformStamped icp_tf_msg;
+    geometry_msgs::msg::TransformStamped pose_tf_msg;
+    geometry_msgs::msg::TransformStamped transform_msg;
 
-    tf::transformKindrToTF(
-        icp_corrected_transform_.cast<double>(), &icp_tf_msg);
-    tf::transformKindrToTF(T_G_C.cast<double>(), &pose_tf_msg);
+    tf::transformKindrToMsg(
+        icp_corrected_transform_.cast<double>(), &icp_tf_msg.transform);
+    tf::transformKindrToMsg(T_G_C.cast<double>(), &pose_tf_msg.transform);
     tf::transformKindrToMsg(
         icp_corrected_transform_.cast<double>(), &transform_msg.transform);
-    tf_broadcaster_.sendTransform(tf::StampedTransform(
-        icp_tf_msg, pointcloud_msg->header.stamp, world_frame_,
-        icp_corrected_frame_));
-    tf_broadcaster_.sendTransform(tf::StampedTransform(
-        pose_tf_msg, pointcloud_msg->header.stamp, icp_corrected_frame_,
-        pose_corrected_frame_));
 
+    icp_tf_msg.header.stamp = pointcloud_msg->header.stamp;
+    icp_tf_msg.header.frame_id = world_frame_;
+    icp_tf_msg.child_frame_id = icp_corrected_frame_;
+    tf_broadcaster_->sendTransform(icp_tf_msg);
+    pose_tf_msg.header.stamp = pointcloud_msg->header.stamp;
+    pose_tf_msg.header.frame_id = icp_corrected_frame_;
+    pose_tf_msg.child_frame_id = pose_corrected_frame_;
+    tf_broadcaster_->sendTransform(pose_tf_msg);
+    transform_msg.header.stamp = pointcloud_msg->header.stamp;
     transform_msg.header.frame_id = world_frame_;
     transform_msg.child_frame_id = icp_corrected_frame_;
-    icp_transform_pub_.publish(transform_msg);
-
+    icp_transform_pub_->publish(transform_msg);
     icp_timer.Stop();
   }
 
   if (verbose_) {
-    ROS_INFO("Integrating a pointcloud with %lu points.", points_C.size());
+    RCLCPP_INFO(
+        node_->get_logger(), "Integrating a pointcloud with %lu points.",
+        points_C.size());
   }
+  integratePointcloud(T_G_C_refined, points_C, normals_C, colors,
+                      is_freespace_pointcloud);
 
-  ros::WallTime start = ros::WallTime::now();
-  // non-projective TSDF integration
-  integratePointcloud(
-      T_G_C_refined, points_C, normals_C, colors, is_freespace_pointcloud);
-  ros::WallTime end = ros::WallTime::now();
-  if (verbose_) {
-    ROS_INFO(
-        "Finished integrating in %f seconds, have %lu blocks.",
-        (end - start).toSec(),
-        tsdf_map_->getTsdfLayer().getNumberOfAllocatedBlocks());
-  }
   // mesh reconstruction with the counter interval
   if (update_mesh_every_n_ > 0 && frame_count_ != 0 &&
       frame_count_ % update_mesh_every_n_ == 0) {
@@ -412,19 +405,21 @@ void NpTsdfServer::processPointCloudMessageAndInsert(
 
 void NpTsdfServer::publishRobotMesh(const Transformation& T_G_C) {
   // publish the robot model with the pose
-  visualization_msgs::Marker robot_model;
+  visualization_msgs::msg::Marker robot_model;
   robot_model.header.frame_id = world_frame_;
-  robot_model.header.stamp = ros::Time();
+  robot_model.header.stamp = node_->get_clock()->now();
+  robot_model.ns = "robot";
+  robot_model.id = 0;
+  robot_model.type = visualization_msgs::msg::Marker::MESH_RESOURCE;
+  robot_model.action = visualization_msgs::msg::Marker::ADD;
   robot_model.mesh_resource = "file://" + robot_model_file_;
-  robot_model.mesh_use_embedded_materials = true;
-  robot_model.scale.x = robot_model.scale.y = robot_model.scale.z =
-      robot_model_scale_;
-  robot_model.lifetime = ros::Duration();
-  robot_model.action = visualization_msgs::Marker::MODIFY;
-  robot_model.color.a = robot_model.color.r = robot_model.color.g =
-      robot_model.color.b = 1.;
-  robot_model.type = visualization_msgs::Marker::MESH_RESOURCE;
-
+  robot_model.scale.x = robot_model_scale_;
+  robot_model.scale.y = robot_model_scale_;
+  robot_model.scale.z = robot_model_scale_;
+  robot_model.color.a = 1.0;
+  robot_model.color.r = 1.0;
+  robot_model.color.g = 1.0;
+  robot_model.color.b = 1.0;
   // Change to horizontal camera frame
   Transformation T_G_CH = T_G_C * transformer_.getModelTransform();
   Eigen::Quaternionf quatrot = T_G_CH.getEigenQuaternion();
@@ -437,19 +432,17 @@ void NpTsdfServer::publishRobotMesh(const Transformation& T_G_C) {
   robot_model.pose.position.x = translation(0);
   robot_model.pose.position.y = translation(1);
   robot_model.pose.position.z = translation(2);
-  robot_model_pub_.publish(robot_model);
+  robot_model_pub_->publish(robot_model);
 }
-
-// Checks if we can get the next message from queue.
 bool NpTsdfServer::getNextPointcloudFromQueue(
-    std::queue<sensor_msgs::PointCloud2::Ptr>* queue,
-    sensor_msgs::PointCloud2::Ptr* pointcloud_msg, Transformation* T_G_C) {
+    std::queue<sensor_msgs::msg::PointCloud2::SharedPtr>* queue,
+    sensor_msgs::msg::PointCloud2::SharedPtr* pointcloud_msg,
+    Transformation* T_G_C) {
   const size_t kMaxQueueSize = 10;
   if (queue->empty()) {
     return false;
   }
   *pointcloud_msg = queue->front();
-
   if (transformer_.lookupTransform(
           sensor_frame_, world_frame_, (*pointcloud_msg)->header.stamp,
           T_G_C)) {
@@ -457,11 +450,9 @@ bool NpTsdfServer::getNextPointcloudFromQueue(
     return true;
   } else {
     if (queue->size() >= kMaxQueueSize) {
-      ROS_ERROR_THROTTLE(
-          60,
-          "Input pointcloud queue getting too long! Dropping "
-          "some pointclouds. Either unable to look up transform "
-          "timestamps or the processing is taking too long.");
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 10000,
+          "Pointcloud queue getting too long! Dropping oldest pointcloud.");
       while (queue->size() >= kMaxQueueSize) {
         queue->pop();
       }
@@ -471,23 +462,22 @@ bool NpTsdfServer::getNextPointcloudFromQueue(
 }
 
 void NpTsdfServer::insertPointcloud(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in) {
-  if (pointcloud_msg_in->header.stamp - last_msg_time_ptcloud_ >
+    const sensor_msgs::msg::PointCloud2::SharedPtr pointcloud_msg_in) {
+  rclcpp::Time header_stamp(pointcloud_msg_in->header.stamp);
+  if (header_stamp - last_msg_time_ptcloud_ >
       min_time_between_msgs_) {
-    last_msg_time_ptcloud_ = pointcloud_msg_in->header.stamp;
+    last_msg_time_ptcloud_ = header_stamp;
     // So we have to process the queue anyway... Push this back.
     pointcloud_queue_.push(pointcloud_msg_in);
   }
 
   Transformation T_G_C;
-  sensor_msgs::PointCloud2::Ptr pointcloud_msg;
+  sensor_msgs::msg::PointCloud2::SharedPtr pointcloud_msg;
   bool processed_any = false;
-  while (
-      getNextPointcloudFromQueue(&pointcloud_queue_, &pointcloud_msg, &T_G_C)) {
+  while (getNextPointcloudFromQueue(&pointcloud_queue_, &pointcloud_msg, &T_G_C)) {
     constexpr bool is_freespace_pointcloud = false;
     // main processing entrance
-    processPointCloudMessageAndInsert(
-        pointcloud_msg, T_G_C, is_freespace_pointcloud);
+    processPointCloudMessageAndInsert(pointcloud_msg, T_G_C, is_freespace_pointcloud);
     processed_any = true;
   }
 
@@ -500,26 +490,28 @@ void NpTsdfServer::insertPointcloud(
   }
 
   if (timing_)
-    ROS_INFO_STREAM(
+    RCLCPP_INFO_STREAM(node_->get_logger(), 
         "Frame [" << frame_count_ << "] timings: " << std::endl
                   << timing::Timing::Print());
   if (verbose_)
-    ROS_INFO_STREAM(
+    RCLCPP_INFO_STREAM(
+        node_->get_logger(),
         "Layer memory: " << tsdf_map_->getTsdfLayer().getMemorySize());
   frame_count_++;
 }
 
 void NpTsdfServer::insertFreespacePointcloud(
-    const sensor_msgs::PointCloud2::Ptr& pointcloud_msg_in) {
-  if (pointcloud_msg_in->header.stamp - last_msg_time_freespace_ptcloud_ >
+    const sensor_msgs::msg::PointCloud2::SharedPtr pointcloud_msg_in) {
+  rclcpp::Time header_stamp(pointcloud_msg_in->header.stamp);
+  if ((header_stamp - last_msg_time_freespace_ptcloud_) <
       min_time_between_msgs_) {
-    last_msg_time_freespace_ptcloud_ = pointcloud_msg_in->header.stamp;
+    last_msg_time_freespace_ptcloud_ = header_stamp;
     // So we have to process the queue anyway... Push this back.
     freespace_pointcloud_queue_.push(pointcloud_msg_in);
   }
 
   Transformation T_G_C;
-  sensor_msgs::PointCloud2::Ptr pointcloud_msg;
+  sensor_msgs::msg::PointCloud2::SharedPtr pointcloud_msg;
   while (getNextPointcloudFromQueue(
       &freespace_pointcloud_queue_, &pointcloud_msg, &T_G_C)) {
     constexpr bool is_freespace_pointcloud = true;
@@ -528,10 +520,11 @@ void NpTsdfServer::insertFreespacePointcloud(
   }
 }
 
-void NpTsdfServer::integratePointcloud(
-    const Transformation& T_G_C, const Pointcloud& points_C,
-    const Pointcloud& normals_C, const Colors& colors,
-    const bool is_freespace_pointcloud) {
+void NpTsdfServer::integratePointcloud(const Transformation& T_G_C,
+                                       const Pointcloud& points_C,
+                                       const Pointcloud& normals_C,
+                                       const Colors& colors,
+                                       const bool is_freespace_pointcloud) {
   CHECK_EQ(points_C.size(), colors.size());
   CHECK_EQ(points_C.size(), normals_C.size());
   tsdf_integrator_->integratePointCloud(
@@ -543,55 +536,63 @@ void NpTsdfServer::publishAllUpdatedTsdfVoxels() {
   pcl::PointCloud<pcl::PointXYZI> pointcloud_d;
   createDistancePointcloudFromTsdfLayer(
       tsdf_map_->getTsdfLayer(), &pointcloud_d);
-  pointcloud_d.header.frame_id = world_frame_;
-  tsdf_pointcloud_pub_.publish(pointcloud_d);
-  // Create a pointcloud with gradient direction = intensity.
+  sensor_msgs::msg::PointCloud2 pointcloud_msg;
+  pcl::toROSMsg(pointcloud_d, pointcloud_msg);
+  pointcloud_msg.header.frame_id = world_frame_;
+
+  tsdf_pointcloud_pub_->publish(pointcloud_msg);
   pcl::PointCloud<pcl::PointXYZI> pointcloud_g;
   createGradientPointcloudFromTsdfLayer(
       tsdf_map_->getTsdfLayer(), &pointcloud_g);
-  pointcloud_g.header.frame_id = world_frame_;
-  gsdf_pointcloud_pub_.publish(pointcloud_g);
+
+  pcl::toROSMsg(pointcloud_g, pointcloud_msg);
+  pointcloud_msg.header.frame_id = world_frame_;
+  gsdf_pointcloud_pub_->publish(pointcloud_msg);
 }
 
 void NpTsdfServer::publishTsdfSurfacePoints() {
   pcl::PointCloud<pcl::PointXYZRGB> pointcloud;
   const float surface_distance_thresh =
       tsdf_map_->getTsdfLayer().voxel_size() * 0.75;
-  createSurfacePointcloudFromTsdfLayer(
-      tsdf_map_->getTsdfLayer(), surface_distance_thresh, &pointcloud);
-
+  createSurfacePointcloudFromTsdfLayer(tsdf_map_->getTsdfLayer(),
+                                       surface_distance_thresh, &pointcloud);
   pointcloud.header.frame_id = world_frame_;
-  surface_pointcloud_pub_.publish(pointcloud);
+  sensor_msgs::msg::PointCloud2 pointcloud_msg;
+  pcl::toROSMsg(pointcloud, pointcloud_msg);
+  surface_pointcloud_pub_->publish(pointcloud_msg);
 }
 
 void NpTsdfServer::publishTsdfOccupiedNodes() {
-  visualization_msgs::MarkerArray marker_array;
-  createOccupancyBlocksFromTsdfLayer(
-      tsdf_map_->getTsdfLayer(), world_frame_, &marker_array);
-  occupancy_marker_pub_.publish(marker_array);
+  visualization_msgs::msg::MarkerArray marker_array;
+  createOccupancyBlocksFromTsdfLayer(tsdf_map_->getTsdfLayer(), world_frame_,
+                                     &marker_array);
+  occupancy_marker_pub_->publish(marker_array);
 }
 
-// Publish not only the tsdf value but also the signe distance
-// gradient direction
 void NpTsdfServer::publishSlices() {
   pcl::PointCloud<pcl::PointXYZI> pointcloud_d;
   createDistancePointcloudFromTsdfLayerSlice(
       tsdf_map_->getTsdfLayer(), 2, slice_level_, &pointcloud_d);
-  pointcloud_d.header.frame_id = world_frame_;
-  tsdf_slice_pub_.publish(pointcloud_d);
+
+  sensor_msgs::msg::PointCloud2 pointcloud_msg;
+  pcl::toROSMsg(pointcloud_d, pointcloud_msg);
+  pointcloud_msg.header.frame_id = world_frame_;
+  tsdf_slice_pub_->publish(pointcloud_msg);
 
   pcl::PointCloud<pcl::PointXYZI> pointcloud_g;
   createGradientPointcloudFromTsdfLayerSlice(
       tsdf_map_->getTsdfLayer(), 2, slice_level_, &pointcloud_g);
-  pointcloud_g.header.frame_id = world_frame_;
-  gsdf_slice_pub_.publish(pointcloud_g);
+  pcl::toROSMsg(pointcloud_g, pointcloud_msg);
+  pointcloud_msg.header.frame_id = world_frame_;
+  gsdf_slice_pub_->publish(pointcloud_msg);
 }
+
 
 void NpTsdfServer::publishMap(bool reset_remote_map) {
   if (!publish_tsdf_map_) {
     return;
   }
-  int subscribers = this->tsdf_map_pub_.getNumSubscribers();
+  int subscribers = tsdf_map_pub_->get_subscription_count();
   if (subscribers > 0) {
     if (num_subscribers_tsdf_map_ < subscribers) {
       // Always reset the remote map and send all when a new subscriber
@@ -601,13 +602,14 @@ void NpTsdfServer::publishMap(bool reset_remote_map) {
     }
     const bool only_updated = !reset_remote_map;
     timing::Timer publish_map_timer("map/publish_tsdf");
-    voxblox_msgs::Layer layer_msg;
+    voxblox_msgs::msg::Layer layer_msg;
     serializeLayerAsMsg<TsdfVoxel>(
-        this->tsdf_map_->getTsdfLayer(), only_updated, &layer_msg);
+        tsdf_map_->getTsdfLayer(), only_updated, &layer_msg);
     if (reset_remote_map) {
-      layer_msg.action = static_cast<uint8_t>(MapDerializationAction::kReset);
+      layer_msg.action = static_cast<uint8_t>(
+          voxblox_msgs::msg::Layer::ACTION_RESET);
     }
-    this->tsdf_map_pub_.publish(layer_msg);
+    tsdf_map_pub_->publish(layer_msg);
     publish_map_timer.Stop();
   }
   num_subscribers_tsdf_map_ = subscribers;
@@ -626,7 +628,7 @@ void NpTsdfServer::publishPointclouds() {
 
 void NpTsdfServer::updateMesh() {
   if (verbose_) {
-    ROS_INFO("Updating mesh.");
+    RCLCPP_INFO(node_->get_logger(), "Updating mesh.");
   }
 
   timing::Timer generate_mesh_timer("mesh/update");
@@ -637,10 +639,10 @@ void NpTsdfServer::updateMesh() {
 
   timing::Timer publish_mesh_timer("mesh/publish");
 
-  voxblox_msgs::Mesh mesh_msg;
+  voxblox_msgs::msg::Mesh mesh_msg;
   generateVoxbloxMeshMsg(mesh_layer_, color_mode_, &mesh_msg);
   mesh_msg.header.frame_id = world_frame_;
-  mesh_pub_.publish(mesh_msg);
+  mesh_pub_->publish(mesh_msg);
 
   if (cache_mesh_) {
     cached_mesh_msg_ = mesh_msg;
@@ -670,10 +672,10 @@ bool NpTsdfServer::generateMesh() {
   generate_mesh_timer.Stop();
 
   timing::Timer publish_mesh_timer("mesh/publish");
-  voxblox_msgs::Mesh mesh_msg;
+  voxblox_msgs::msg::Mesh mesh_msg;
   generateVoxbloxMeshMsg(mesh_layer_, color_mode_, &mesh_msg);
   mesh_msg.header.frame_id = world_frame_;
-  mesh_pub_.publish(mesh_msg);
+  mesh_pub_->publish(mesh_msg);
 
   publish_mesh_timer.Stop();
 
@@ -682,14 +684,19 @@ bool NpTsdfServer::generateMesh() {
     const bool success = outputMeshLayerAsPly(mesh_filename_, *mesh_layer_);
     output_mesh_timer.Stop();
     if (success) {
-      ROS_INFO("Output file as PLY: %s", mesh_filename_.c_str());
+      RCLCPP_INFO(
+          node_->get_logger(), "Output file as PLY: %s",
+          mesh_filename_.c_str());
     } else {
-      ROS_INFO("Failed to output mesh as PLY: %s", mesh_filename_.c_str());
+      RCLCPP_INFO(
+          node_->get_logger(), "Failed to output mesh as PLY: %s",
+          mesh_filename_.c_str());
     }
   }
 
   if (timing_)
-    ROS_INFO_STREAM("Mesh Timings: " << std::endl << timing::Timing::Print());
+    RCLCPP_INFO(
+        node_->get_logger(), "Mesh Timings: %s", timing::Timing::Print().c_str());
   return true;
 }
 
@@ -712,51 +719,49 @@ bool NpTsdfServer::loadMap(const std::string& file_path) {
   return success;
 }
 
-bool NpTsdfServer::clearMapCallback(
-    std_srvs::Empty::Request& /*request*/, std_srvs::Empty::Response&
-    /*response*/) {  // NOLINT
+void NpTsdfServer::clearMapCallback(
+    const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    std::shared_ptr<std_srvs::srv::Empty::Response> response) {
   clear();
-  return true;
 }
 
-bool NpTsdfServer::generateMeshCallback(
-    std_srvs::Empty::Request& /*request*/, std_srvs::Empty::Response&
-    /*response*/) {  // NOLINT
-  return generateMesh();
+void NpTsdfServer::generateMeshCallback(
+    const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    std::shared_ptr<std_srvs::srv::Empty::Response> response) {
+  generateMesh();
 }
 
-bool NpTsdfServer::saveMapCallback(
-    voxblox_msgs::FilePath::Request& request, voxblox_msgs::FilePath::Response&
-    /*response*/) {  // NOLINT
-  return saveMap(request.file_path);
+void NpTsdfServer::saveMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response) {
+  response->success = saveMap(request->file_path);
 }
 
-bool NpTsdfServer::loadMapCallback(
-    voxblox_msgs::FilePath::Request& request, voxblox_msgs::FilePath::Response&
-    /*response*/) {  // NOLINT
-  bool success = loadMap(request.file_path);
-  return success;
+void NpTsdfServer::loadMapCallback(
+    const std::shared_ptr<voxblox_msgs::srv::FilePath::Request> request,
+    std::shared_ptr<voxblox_msgs::srv::FilePath::Response> response) {
+  response->success = loadMap(request->file_path);
 }
 
-bool NpTsdfServer::publishPointcloudsCallback(
-    std_srvs::Empty::Request& /*request*/, std_srvs::Empty::Response&
-    /*response*/) {  // NOLINT
+void NpTsdfServer::publishPointcloudsCallback(
+    const std::shared_ptr<std_srvs::srv::Empty::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Empty::Response> /*response*/) {
   publishPointclouds();
-  return true;
 }
 
-bool NpTsdfServer::publishTsdfMapCallback(
-    std_srvs::Empty::Request& /*request*/, std_srvs::Empty::Response&
-    /*response*/) {  // NOLINT
-  publishMap();
-  return true;
+void NpTsdfServer::publishTsdfMapCallback(
+    const std::shared_ptr<std_srvs::srv::Empty::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Empty::Response> /*response*/) {
+  publishMap(true);
 }
 
-void NpTsdfServer::updateMeshEvent(const ros::TimerEvent& /*event*/) {
+void NpTsdfServer::updateMeshEvent(
+    const rclcpp::TimerBase::SharedPtr /*event*/) {
   updateMesh();
 }
 
-void NpTsdfServer::publishMapEvent(const ros::TimerEvent& /*event*/) {
+void NpTsdfServer::publishMapEvent(
+    const rclcpp::TimerBase::SharedPtr /*event*/) {
   publishMap();
 }
 
@@ -771,16 +776,18 @@ void NpTsdfServer::clear() {
   }
 }
 
-void NpTsdfServer::tsdfMapCallback(const voxblox_msgs::Layer& layer_msg) {
+void NpTsdfServer::tsdfMapCallback(
+    const voxblox_msgs::msg::Layer::SharedPtr layer_msg) {
   timing::Timer receive_map_timer("map/receive_tsdf");
 
   bool success =
       deserializeMsgToLayer<TsdfVoxel>(layer_msg, tsdf_map_->getTsdfLayerPtr());
 
   if (!success) {
-    ROS_ERROR_THROTTLE(10, "Got an invalid TSDF map message!");
+    RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                          "Got an invalid TSDF map message!");
   } else {
-    ROS_INFO_ONCE("Got an TSDF map from ROS topic!");
+    RCLCPP_INFO_ONCE(node_->get_logger(), "Got a TSDF map from a topic!");
     if (publish_pointclouds_on_update_) {
       publishPointclouds();
     }
@@ -788,11 +795,8 @@ void NpTsdfServer::tsdfMapCallback(const voxblox_msgs::Layer& layer_msg) {
 }
 
 bool NpTsdfServer::projectPointCloudToImage(
-    const Pointcloud& points_C, const Colors& colors,
-    cv::Mat& vertex_map,   // corresponding point // NOLINT
-    cv::Mat& depth_image,  // Float depth image (CV_32FC1). // NOLINT
-    cv::Mat& color_image,
-    float min_z, 
+    const Pointcloud& points_C, const Colors& colors, cv::Mat& vertex_map,
+    cv::Mat& depth_image, cv::Mat& color_image, float min_z,
     float min_d) const {
   // TODO(py): consider to calculate in parallel to speed up
   for (size_t i = 0; i < points_C.size(); i++) {

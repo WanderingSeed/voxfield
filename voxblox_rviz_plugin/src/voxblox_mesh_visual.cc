@@ -2,8 +2,10 @@
 
 #include <limits>
 
-#include <OGRE/OgreSceneManager.h>
-#include <OGRE/OgreSceneNode.h>
+#include <rviz_common/display_context.hpp>
+#include <OgreSceneNode.h>
+#include <OgreManualObject.h>
+#include <OgreSceneManager.h>
 
 #include <voxblox/mesh/mesh_utils.h>
 
@@ -11,11 +13,9 @@ namespace voxblox_rviz_plugin {
 
 unsigned int VoxbloxMeshVisual::instance_counter_ = 0;
 
-VoxbloxMeshVisual::VoxbloxMeshVisual(
-    Ogre::SceneManager* scene_manager, Ogre::SceneNode* parent_node,
-    std::string name_space)
-    : scene_manager_(scene_manager),
-      name_space_(std::move(name_space)),
+VoxbloxMeshVisual::VoxbloxMeshVisual(rviz_common::DisplayContext* context,
+                                       Ogre::SceneNode* parent_node)
+    : scene_manager_(context->getSceneManager()),
       is_enabled_(true) {
   frame_node_ = parent_node->createChildSceneNode();
   instance_number_ = instance_counter_++;
@@ -28,15 +28,17 @@ VoxbloxMeshVisual::~VoxbloxMeshVisual() {
   }
 }
 
-void VoxbloxMeshVisual::setPose(
-    const Ogre::Vector3& position, const Ogre::Quaternion& orientation) {
+void VoxbloxMeshVisual::setFramePosition(const Ogre::Vector3& position) {
   frame_node_->setPosition(position);
+}
+
+void VoxbloxMeshVisual::setFrameOrientation(const Ogre::Quaternion& orientation) {
   frame_node_->setOrientation(orientation);
 }
 
 void VoxbloxMeshVisual::setMessage(
-    const voxblox_msgs::Mesh::ConstPtr& msg, uint8_t alpha) {
-  for (const voxblox_msgs::MeshBlock& mesh_block : msg->mesh_blocks) {
+    voxblox_msgs::msg::Mesh::ConstSharedPtr msg) {
+  for (const voxblox_msgs::msg::MeshBlock& mesh_block : msg->mesh_blocks) {
     const voxblox::BlockIndex index(
         mesh_block.index[0], mesh_block.index[1], mesh_block.index[2]);
 
@@ -90,7 +92,6 @@ void VoxbloxMeshVisual::setMessage(
         color.r = mesh_block.r[i];
         color.g = mesh_block.g[i];
         color.b = mesh_block.b[i];
-
       } else {
         // reconstruct normals coloring
         color.r = std::numeric_limits<uint8_t>::max() *
@@ -100,7 +101,8 @@ void VoxbloxMeshVisual::setMessage(
         color.b = std::numeric_limits<uint8_t>::max() *
                   (mesh.normals[i].z() * 0.5f + 0.5f);
       }
-      color.a = alpha;
+      // color.a is not used in the shader
+      color.a = 255;
       mesh.colors.push_back(color);
     }
 
@@ -126,8 +128,7 @@ void VoxbloxMeshVisual::setMessage(
       std::string object_name = std::to_string(index.x()) + std::string(" ") +
                                 std::to_string(index.y()) + std::string(" ") +
                                 std::to_string(index.z()) + std::string(" ") +
-                                std::to_string(instance_number_) +
-                                std::string(" ") + name_space_;
+                                std::to_string(instance_number_);
       ogre_object = scene_manager_->createManualObject(object_name);
       object_map_.insert(std::make_pair(index, ogre_object));
       if (!is_enabled_) {
@@ -141,9 +142,6 @@ void VoxbloxMeshVisual::setMessage(
     ogre_object->estimateVertexCount(connected_mesh.vertices.size());
     ogre_object->estimateIndexCount(connected_mesh.indices.size());
     std::string material_name("VoxbloxMaterial");
-    if (alpha < std::numeric_limits<uint8_t>::max()) {
-      material_name = "VoxbloxMaterialTransparent";
-    }
     ogre_object->begin(material_name, Ogre::RenderOperation::OT_TRIANGLE_LIST);
 
     for (size_t i = 0; i < connected_mesh.vertices.size(); ++i) {
@@ -173,6 +171,9 @@ void VoxbloxMeshVisual::setMessage(
     ogre_object->end();
   }
 }
+void VoxbloxMeshVisual::setVisible(bool visible) {
+  frame_node_->setVisible(visible);
+}
 
 void VoxbloxMeshVisual::setEnabled(bool enabled) {
   if (enabled && !is_enabled_) {
@@ -187,6 +188,16 @@ void VoxbloxMeshVisual::setEnabled(bool enabled) {
     }
   }
   is_enabled_ = enabled;
+}
+
+void VoxbloxMeshVisual::reset() {
+  if (scene_manager_ == nullptr) {
+    return;
+  }
+  for (auto& ogre_object_pair : object_map_) {
+    scene_manager_->destroyManualObject(ogre_object_pair.second);
+  }
+  object_map_.clear();
 }
 
 }  // namespace voxblox_rviz_plugin
