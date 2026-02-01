@@ -38,6 +38,7 @@ add_library(${PROJECT_NAME}
   src/transformer.cc
   src/tsdf_server.cc
   src/np_tsdf_server.cc
+  src/slam_tsdf_reconstruction.cc
   src/voxfield_server.cc
   src/voxblox_server.cc
   src/voxedt_server.cc
@@ -50,7 +51,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../minkindr/minkindr/include>
 )
 
-ament_target_dependencies(${PROJECT_NAME}
+set(dependencies
   rclcpp
   std_msgs
   sensor_msgs
@@ -70,6 +71,8 @@ ament_target_dependencies(${PROJECT_NAME}
   tf2_geometry_msgs
   voxblox
 )
+
+ament_target_dependencies(${PROJECT_NAME} ${dependencies})
 
 target_link_libraries(${PROJECT_NAME} glog::glog)
 if(DEFINED voxblox_INCLUDE_DIRS)
@@ -135,5 +138,14 @@ install(TARGETS
 )
 
 install(DIRECTORY include/ DESTINATION include)
+
+ament_export_include_directories(
+  include
+  ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+ament_export_libraries(${PROJECT_NAME})
+
+ament_export_dependencies(${dependencies})
 
 ament_package()

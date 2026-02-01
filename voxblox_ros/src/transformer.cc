@@ -1,4 +1,5 @@
 #include "voxblox_ros/transformer.h"
+#include "voxblox_ros/ros_params.h"
 
 #include <cinttypes>
 #include <vector>
@@ -20,20 +21,18 @@ static void transformMsgToTransformation(const geometry_msgs::msg::Transform& t_
 namespace voxblox {
 
 Transformer::Transformer(const rclcpp::Node::SharedPtr& node)
-    : node_(node), world_frame_("world"), sensor_frame_(""), use_tf_transforms_(true), timestamp_tolerance_ns_(1000000) {
-  // Read parameters (declare defaults where appropriate)
-  node_->declare_parameter<std::string>("world_frame", world_frame_);
-  node_->get_parameter("world_frame", world_frame_);
-  node_->declare_parameter<std::string>("sensor_frame", sensor_frame_);
-  node_->get_parameter("sensor_frame", sensor_frame_);
+    : Transformer(node, getTransformerConfigFromRosParam(node)) {}
 
-  double timestamp_tolerance_sec = static_cast<double>(timestamp_tolerance_ns_) / 1.0e9;
-  node_->declare_parameter<double>("timestamp_tolerance_sec", timestamp_tolerance_sec);
-  node_->get_parameter("timestamp_tolerance_sec", timestamp_tolerance_sec);
-  timestamp_tolerance_ns_ = static_cast<int64_t>(timestamp_tolerance_sec * 1.0e9);
+Transformer::Transformer(const rclcpp::Node::SharedPtr& node, const Config& config)
+    : node_(node) {
+  initializeFromConfig(config);
+}
 
-  node_->declare_parameter<bool>("use_tf_transforms", use_tf_transforms_);
-  node_->get_parameter("use_tf_transforms", use_tf_transforms_);
+void Transformer::initializeFromConfig(const Config& config) {
+  world_frame_ = config.world_frame;
+  sensor_frame_ = config.sensor_frame;
+  use_tf_transforms_ = config.use_tf_transforms;
+  timestamp_tolerance_ns_ = static_cast<int64_t>(config.timestamp_tolerance_sec * 1.0e9);
 
   // TF2 setup
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
@@ -43,86 +42,67 @@ Transformer::Transformer(const rclcpp::Node::SharedPtr& node)
     transform_sub_ = node_->create_subscription<geometry_msgs::msg::TransformStamped>(
         "transform", 40, std::bind(&Transformer::transformCallback, this, std::placeholders::_1));
 
-    // Retrieve T_D_C from params.
-    // Transform from base_link to depth camera.
-    std::vector<double> T_B_D_vector;
-    node_->declare_parameter("T_B_D", rclcpp::ParameterValue(T_B_D_vector));
-    if (node_->get_parameter("T_B_D", T_B_D_vector) && !T_B_D_vector.empty()) {
-      if (T_B_D_vector.size() != 16) {
+    // Process T_B_D transform matrix
+    if (!config.T_B_D_vector.empty()) {
+      if (config.T_B_D_vector.size() != 16) {
         RCLCPP_ERROR(node_->get_logger(),
                      "Parameter T_B_D must be a 4x4 matrix (16 doubles), but has %zu values.",
-                     T_B_D_vector.size());
+                     config.T_B_D_vector.size());
       } else {
         Eigen::Matrix4f T_B_D_matrix;
-      for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-          T_B_D_matrix(i, j) = static_cast<float>(T_B_D_vector[i * 4 + j]);
+        for (int i = 0; i < 4; ++i) {
+          for (int j = 0; j < 4; ++j) {
+            T_B_D_matrix(i, j) = static_cast<float>(config.T_B_D_vector[i * 4 + j]);
+          }
+        }
+        T_B_D_ = Transformation(T_B_D_matrix);
+        if (config.invert_T_B_D) {
+          T_B_D_ = T_B_D_.inverse();
         }
       }
-      T_B_D_ = Transformation(T_B_D_matrix);
-      }
     }
 
-    bool invert_T_B_D = false;
-    node_->declare_parameter<bool>("invert_T_B_D", invert_T_B_D);
-    node_->get_parameter("invert_T_B_D", invert_T_B_D);
-    if (invert_T_B_D) {
-      T_B_D_ = T_B_D_.inverse();
-    }
-
-    // Transform from base_link to color camera.
-    std::vector<double> T_B_C_vector;
-    node_->declare_parameter("T_B_C", rclcpp::ParameterValue(T_B_C_vector));
-    if (node_->get_parameter("T_B_C", T_B_C_vector) && !T_B_C_vector.empty()) {
-      if (T_B_C_vector.size() != 16) {
+    // Process T_B_C transform matrix
+    if (!config.T_B_C_vector.empty()) {
+      if (config.T_B_C_vector.size() != 16) {
         RCLCPP_ERROR(node_->get_logger(),
                      "Parameter T_B_C must be a 4x4 matrix (16 doubles), but has %zu values.",
-                     T_B_C_vector.size());
+                     config.T_B_C_vector.size());
       } else {
         Eigen::Matrix4f T_B_C_matrix;
-      for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-          T_B_C_matrix(i, j) = static_cast<float>(T_B_C_vector[i * 4 + j]);
+        for (int i = 0; i < 4; ++i) {
+          for (int j = 0; j < 4; ++j) {
+            T_B_C_matrix(i, j) = static_cast<float>(config.T_B_C_vector[i * 4 + j]);
+          }
+        }
+        T_B_C_ = Transformation(T_B_C_matrix);
+        if (config.invert_T_B_C) {
+          T_B_C_ = T_B_C_.inverse();
         }
       }
-      T_B_C_ = Transformation(T_B_C_matrix);
-      }
-    }
-
-    bool invert_T_B_C = false;
-    node_->declare_parameter<bool>("invert_T_B_C", invert_T_B_C);
-    node_->get_parameter("invert_T_B_C", invert_T_B_C);
-    if (invert_T_B_C) {
-      T_B_C_ = T_B_C_.inverse();
     }
   }
+  
   T_D_C_ = T_B_D_.inverse() * T_B_C_;
 
-  // Model transformation
-  // Transform from color camera to checkerboard, if such exists.
-  std::vector<double> T_C_CH_vector;
-  node_->declare_parameter("T_C_CH", rclcpp::ParameterValue(T_C_CH_vector));
-  if (node_->get_parameter("T_C_CH", T_C_CH_vector) && !T_C_CH_vector.empty()) {
-    if (T_C_CH_vector.size() != 16) {
+  // Process T_C_CH transform matrix (model transformation)
+  if (!config.T_C_CH_vector.empty()) {
+    if (config.T_C_CH_vector.size() != 16) {
       RCLCPP_ERROR(node_->get_logger(),
                    "Parameter T_C_CH must be a 4x4 matrix (16 doubles), but has %zu values.",
-                   T_C_CH_vector.size());
+                   config.T_C_CH_vector.size());
     } else {
       Eigen::Matrix4f T_C_CH_matrix;
       for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-          T_C_CH_matrix(i, j) = static_cast<float>(T_C_CH_vector[i * 4 + j]);
+          T_C_CH_matrix(i, j) = static_cast<float>(config.T_C_CH_vector[i * 4 + j]);
         }
       }
       T_C_CH_ = Transformation(T_C_CH_matrix);
+      if (config.invert_T_C_CH) {
+        T_C_CH_ = T_C_CH_.inverse();
+      }
     }
-  }
-
-  bool invert_T_C_CH = false;
-  node_->declare_parameter<bool>("invert_T_C_CH", invert_T_C_CH);
-  node_->get_parameter("invert_T_C_CH", invert_T_C_CH);
-  if (invert_T_C_CH) {
-    T_C_CH_ = T_C_CH_.inverse();
   }
 }
 

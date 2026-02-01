@@ -443,7 +443,7 @@ void VoxbloxEvaluator::visualize() {
   sensor_msgs::msg::PointCloud2 pcmsg;
   pcl::toROSMsg(gt_ptcloud_, pcmsg);
   pcmsg.header.frame_id = frame_id_;
-  pcmsg.header.stamp = node_->get_clock()->now();
+  pcmsg.header.stamp = node_->now();
   gt_ptcloud_pub_->publish(pcmsg);
   RCLCPP_INFO(node_->get_logger(), "Finished visualizing.");
 }
@@ -464,7 +464,7 @@ void VoxbloxEvaluator::visualizeEsdf() {
     sensor_msgs::msg::PointCloud2 msg;
     pcl::toROSMsg(pointcloud, msg);
     msg.header.frame_id = frame_id_;
-    msg.header.stamp = node_->get_clock()->now();
+    msg.header.stamp = node_->now();
     esdf_error_slice_pub_->publish(msg);
   }
 }

@@ -218,7 +218,7 @@ void SimulationServer::generateSDF() {
         sensor_msgs::msg::PointCloud2 msg;
         pcl::toROSMsg(ptcloud_pcl, msg);
         msg.header.frame_id = world_frame_;
-        msg.header.stamp = node_->get_clock()->now();
+        msg.header.stamp = node_->now();
         view_ptcloud_pub_->publish(msg);
       }
     }
@@ -265,7 +265,7 @@ void SimulationServer::visualize() {
     sensor_msgs::msg::PointCloud2 msg;
     pcl::toROSMsg(pointcloud, msg);
     msg.header.frame_id = world_frame_;
-    msg.header.stamp = node_->get_clock()->now();
+    msg.header.stamp = node_->now();
     tsdf_gt_pub_->publish(msg);
   }
 
@@ -277,7 +277,7 @@ void SimulationServer::visualize() {
     sensor_msgs::msg::PointCloud2 msg;
     pcl::toROSMsg(pointcloud, msg);
     msg.header.frame_id = world_frame_;
-    msg.header.stamp = node_->get_clock()->now();
+    msg.header.stamp = node_->now();
     esdf_gt_pub_->publish(msg);
   }
 
@@ -290,7 +290,7 @@ void SimulationServer::visualize() {
     sensor_msgs::msg::PointCloud2 msg;
     pcl::toROSMsg(pointcloud, msg);
     msg.header.frame_id = world_frame_;
-    msg.header.stamp = node_->get_clock()->now();
+    msg.header.stamp = node_->now();
     tsdf_test_pub_->publish(msg);
   }
 
@@ -302,7 +302,7 @@ void SimulationServer::visualize() {
     sensor_msgs::msg::PointCloud2 msg;
     pcl::toROSMsg(pointcloud, msg);
     msg.header.frame_id = world_frame_;
-    msg.header.stamp = node_->get_clock()->now();
+    msg.header.stamp = node_->now();
     esdf_test_pub_->publish(msg);
   }
 

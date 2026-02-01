@@ -48,7 +48,7 @@ void VoxbloxMeshDisplay::visibleSLOT() {
       // Create an empty mesh message to trigger the transformation update
       auto msg = std::make_shared<voxblox_msgs::msg::Mesh>();
       msg->header.frame_id = fixed_frame_.toStdString();
-      msg->header.stamp = context_->getClock()->now();
+      msg->header.stamp = context_->getRosNodeAbstraction().lock()->get_raw_node()->now();
       updateTransformation(msg);
     }
   }

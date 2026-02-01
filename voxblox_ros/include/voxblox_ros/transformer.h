@@ -2,6 +2,7 @@
 #define VOXBLOX_ROS_TRANSFORMER_H_
 
 #include <string>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -21,7 +22,27 @@ class Transformer {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+  /// Contains all the information needed to setup the Transformer class.
+  struct Config {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    std::string world_frame = "world";
+    std::string sensor_frame = "";
+    bool use_tf_transforms = true;
+    double timestamp_tolerance_sec = 0.001;  // 1ms default
+    
+    // Transform matrices (16 elements each for 4x4 matrix)
+    std::vector<double> T_B_D_vector;  // Transform from base_link to depth camera
+    std::vector<double> T_B_C_vector;  // Transform from base_link to color camera
+    std::vector<double> T_C_CH_vector; // Transform from color camera to checkerboard
+    
+    bool invert_T_B_D = false;
+    bool invert_T_B_C = false;
+    bool invert_T_C_CH = false;
+  };
+
   explicit Transformer(const rclcpp::Node::SharedPtr& node);
+  Transformer(const rclcpp::Node::SharedPtr& node, const Config& config);
 
   bool lookupTransform(
       const std::string& from_frame, const std::string& to_frame,
@@ -34,6 +55,8 @@ class Transformer {
   Transformation getModelTransform();
 
  private:
+  void initializeFromConfig(const Config& config);
+  
   bool lookupTransformTf(
       const std::string& from_frame, const std::string& to_frame,
       const rclcpp::Time& timestamp, Transformation* transform);

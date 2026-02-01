@@ -453,7 +453,7 @@ void VoxbloxServer::visualizeEsdfError() {
     sensor_msgs::msg::PointCloud2 msg;
     pcl::toROSMsg(pointcloud, msg);
     msg.header.frame_id = world_frame_;
-    msg.header.stamp = node_->get_clock()->now();
+    msg.header.stamp = node_->now();
     esdf_error_slice_pub_->publish(msg);
   }
 }

@@ -1,7 +1,7 @@
 #ifndef VOXBLOX_ROS_ROS_PARAMS_H_
 #define VOXBLOX_ROS_ROS_PARAMS_H_
 
-#include <rclcpp/node.hpp>
+#include <rclcpp/rclcpp.hpp>
 #include <voxblox/core/common.h>
 #include <voxblox/alignment/icp.h>
 #include <voxblox/core/esdf_map.h>
@@ -16,14 +16,21 @@
 #include <voxblox/integrator/occupancy_tsdf_integrator.h>
 #include <voxblox/integrator/tsdf_integrator.h>
 #include <voxblox/mesh/mesh_integrator.h>
+#include "voxblox_ros/transformer.h"
 
 namespace voxblox {
 
 namespace internal {
-// Helper function to declare and get parameter in one call
 template <typename T>
 void getParam(const rclcpp::Node::SharedPtr& node, const std::string& name, T* value) {
-  *value = node->declare_parameter(name, *value);
+    // 先检查参数是否已经声明
+    if (!node->has_parameter(name)) {
+        // 参数未声明，先声明
+        *value = node->declare_parameter(name, *value);
+    } else {
+        // 参数已经声明，直接获取
+        node->get_parameter(name, *value);
+    }
 }
 }  // namespace internal
 
@@ -338,6 +345,28 @@ inline EsdfOccEdtIntegrator::Config getEsdfEdtIntegratorConfigFromRosParam(
   esdf_integrator_config.range_boundary_offset(2) = range_boundary_offset_z;
 
   return esdf_integrator_config;
+}
+
+inline Transformer::Config getTransformerConfigFromRosParam(
+    const rclcpp::Node::SharedPtr& node) {
+  Transformer::Config transformer_config;
+
+  internal::getParam(node, "world_frame", &transformer_config.world_frame);
+  internal::getParam(node, "sensor_frame", &transformer_config.sensor_frame);
+  internal::getParam(node, "use_tf_transforms", &transformer_config.use_tf_transforms);
+  internal::getParam(node, "timestamp_tolerance_sec", &transformer_config.timestamp_tolerance_sec);
+  
+  // Transform matrices
+  internal::getParam(node, "T_B_D", &transformer_config.T_B_D_vector);
+  internal::getParam(node, "T_B_C", &transformer_config.T_B_C_vector);
+  internal::getParam(node, "T_C_CH", &transformer_config.T_C_CH_vector);
+  
+  // Inversion flags
+  internal::getParam(node, "invert_T_B_D", &transformer_config.invert_T_B_D);
+  internal::getParam(node, "invert_T_B_C", &transformer_config.invert_T_B_C);
+  internal::getParam(node, "invert_T_C_CH", &transformer_config.invert_T_C_CH);
+
+  return transformer_config;
 }
 
 }  // namespace voxblox
