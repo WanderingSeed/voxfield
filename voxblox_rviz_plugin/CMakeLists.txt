@@ -91,6 +91,11 @@ install(
     DESTINATION share/${PROJECT_NAME}/icons
 )
 
+install(
+    DIRECTORY content/
+    DESTINATION share/${PROJECT_NAME}/content
+)
+
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
     rviz_common

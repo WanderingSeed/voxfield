@@ -24,7 +24,7 @@ void VoxbloxMultiMeshDisplay::onInitialize() {
 
   submap_visibility_property_ = new rviz_common::properties::Property(
       "Submap Visibility", QVariant(),
-      "Allows showing and hiding of individual submaps.", this, SLOT(changed()));
+      "Allows showing and hiding of individual submaps.", this);
 
   all_submaps_visible_property_ = new rviz_common::properties::BoolProperty(
       "Show All", true,
@@ -41,7 +41,7 @@ void VoxbloxMultiMeshDisplay::reset() {
   // Re-create the property.
   submap_visibility_property_ = new rviz_common::properties::Property(
       "Submap Visibility", QVariant(),
-      "Allows showing and hiding of individual submaps.", this, SLOT(changed()));
+      "Allows showing and hiding of individual submaps.", this);
 }
 
 bool validateFloats(const voxblox_msgs::msg::Mesh& msg) {
