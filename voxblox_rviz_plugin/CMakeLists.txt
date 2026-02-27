@@ -21,6 +21,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_definitions(QT_NO_KEYWORDS)
 
+set(HEADER_FILES
+    include/voxblox_rviz_plugin/voxblox_mesh_display.h
+    include/voxblox_rviz_plugin/voxblox_multi_mesh_display.h
+    include/voxblox_rviz_plugin/voxblox_mesh_visual.h
+    include/voxblox_rviz_plugin/material_loader.h
+)
+
 set(SRC_FILES
     src/voxblox_mesh_display.cc
     src/voxblox_multi_mesh_display.cc
@@ -29,6 +36,7 @@ set(SRC_FILES
 )
 
 add_library(${PROJECT_NAME} SHARED
+    ${HEADER_FILES}
     ${SRC_FILES}
 )
 

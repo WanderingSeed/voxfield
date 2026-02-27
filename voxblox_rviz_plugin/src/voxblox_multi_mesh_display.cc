@@ -17,6 +17,8 @@ namespace voxblox_rviz_plugin {
 VoxbloxMultiMeshDisplay::VoxbloxMultiMeshDisplay()
     : rviz_common::MessageFilterDisplay<voxblox_msgs::msg::MultiMesh>() {}
 
+VoxbloxMultiMeshDisplay::~VoxbloxMultiMeshDisplay() = default;
+
 void VoxbloxMultiMeshDisplay::onInitialize() {
   MFDClass::onInitialize();
 
