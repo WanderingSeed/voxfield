@@ -52,10 +52,22 @@ class SlamTsdfReconstruction {
   void processPointcloudDirect(
       const Pointcloud& points_C, 
       const Transformation& T_G_C);
+  
+  // Publish raw pointcloud in global frame
+  void publishRawPointcloud(
+      const Pointcloud& points_C,
+      const Transformation& T_G_C);
 
   virtual void processPointCloudMessageAndInsert(
       const sensor_msgs::msg::PointCloud2::SharedPtr pointcloud_msg,
       const Transformation& T_G_C);
+
+  // Overload that takes PCL pointcloud and colors directly
+  virtual void processPointCloudMessageAndInsert(
+      const Pointcloud& points_C_to_use,
+      const Colors& colors_to_use,
+      const Transformation& T_G_C,
+      const rclcpp::Time& stamp);
 
   void integratePointcloud(
       const Transformation& T_G_C, const Pointcloud& points_C,
@@ -175,6 +187,8 @@ class SlamTsdfReconstruction {
       icp_transform_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr
       robot_model_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      raw_pointcloud_pub_;
 
   /// Publish the complete map for other nodes to consume.
   rclcpp::Publisher<voxblox_msgs::msg::Layer>::SharedPtr tsdf_map_pub_;
@@ -251,6 +265,7 @@ class SlamTsdfReconstruction {
   bool publish_pointclouds_;
   bool publish_tsdf_map_;
   bool publish_robot_model_;
+  bool publish_raw_pointclouds_;
 
   /// Whether to save the latest mesh message sent (for inheriting classes).
   bool cache_mesh_;

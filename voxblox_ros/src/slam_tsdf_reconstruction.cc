@@ -32,6 +32,7 @@ SlamTsdfReconstruction::SlamTsdfReconstruction(
       publish_slices_(false),
       publish_pointclouds_(false),
       publish_tsdf_map_(false),
+      publish_raw_pointclouds_(false),
       cache_mesh_(false),
       enable_icp_(false),
       accumulate_icp_corrections_(true),
@@ -75,6 +76,10 @@ SlamTsdfReconstruction::SlamTsdfReconstruction(
         node_->create_publisher<visualization_msgs::msg::Marker>(
             "robot_model", rclcpp::QoS(100));
   }
+  
+  raw_pointcloud_pub_ =
+      node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+          "raw_pointcloud", rclcpp::QoS(10));
 
   if (enable_icp_) {
     icp_transform_pub_ =
@@ -200,6 +205,7 @@ void SlamTsdfReconstruction::getServerConfigFromRosParam(
 }
 
 internal::getParam(node, "publish_robot_model", &publish_robot_model_);
+internal::getParam(node, "publish_raw_pointclouds", &publish_raw_pointclouds_);
 internal::getParam(node, "robot_model_file", &robot_model_file_);
 internal::getParam(node, "robot_model_scale", &robot_model_scale_);
 internal::getParam(node, "mesh_filename", &mesh_filename_);
@@ -250,7 +256,6 @@ void SlamTsdfReconstruction::processPointCloudMessageAndInsert(
   }
 
   Pointcloud points_C;
-  Pointcloud normals_C;
   Colors colors;
   Labels labels;
 
@@ -277,6 +282,23 @@ void SlamTsdfReconstruction::processPointCloudMessageAndInsert(
     convertPointcloud(pointcloud_pcl, color_map_, &points_C, &colors);
   }
   ptcloud_timer.Stop();
+
+  // Extract timestamp from message
+  rclcpp::Time stamp(pointcloud_msg->header.stamp);
+  
+  // Call the overloaded version with points and colors
+  processPointCloudMessageAndInsert(points_C, colors, T_G_C, stamp);
+}
+
+void SlamTsdfReconstruction::processPointCloudMessageAndInsert(
+    const Pointcloud& points_C_to_use,
+    const Colors& colors_to_use,
+    const Transformation& T_G_C,
+    const rclcpp::Time& stamp) {
+  
+  Pointcloud points_C = points_C_to_use;
+  Pointcloud normals_C;
+  Colors colors = colors_to_use;
 
   // calculate point-wise normal
   timing::Timer range_pre_timer("preprocess/normal_estimation");
@@ -331,15 +353,15 @@ void SlamTsdfReconstruction::processPointCloudMessageAndInsert(
     tf::transformKindrToMsg(
         icp_corrected_transform_.cast<double>(), &transform_msg.transform);
 
-    icp_tf_msg.header.stamp = pointcloud_msg->header.stamp;
+    icp_tf_msg.header.stamp = stamp;
     icp_tf_msg.header.frame_id = world_frame_;
     icp_tf_msg.child_frame_id = icp_corrected_frame_;
     tf_broadcaster_->sendTransform(icp_tf_msg);
-    pose_tf_msg.header.stamp = pointcloud_msg->header.stamp;
+    pose_tf_msg.header.stamp = stamp;
     pose_tf_msg.header.frame_id = icp_corrected_frame_;
     pose_tf_msg.child_frame_id = pose_corrected_frame_;
     tf_broadcaster_->sendTransform(pose_tf_msg);
-    transform_msg.header.stamp = pointcloud_msg->header.stamp;
+    transform_msg.header.stamp = stamp;
     transform_msg.header.frame_id = world_frame_;
     transform_msg.child_frame_id = icp_corrected_frame_;
     icp_transform_pub_->publish(transform_msg);
@@ -408,7 +430,7 @@ void SlamTsdfReconstruction::publishRobotMesh(const Transformation& T_G_C) {
   robot_model_pub_->publish(robot_model);
 }
 
-// Direct interface method with voxblox Pointcloud - calls ROS message version
+// Direct interface method with voxblox Pointcloud
 void SlamTsdfReconstruction::processPointcloudDirect(
     const Pointcloud& points_C, 
     const Transformation& T_G_C) {
@@ -419,29 +441,71 @@ void SlamTsdfReconstruction::processPointcloudDirect(
         points_C.size());
   }
 
-  // Create a ROS message for processing
-  auto pointcloud_msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
-  pointcloud_msg->header.stamp = node_->now();
-  pointcloud_msg->header.frame_id = sensor_frame_;
+  // Publish raw pointcloud if enabled
+  if (publish_raw_pointclouds_) {
+    publishRawPointcloud(points_C, T_G_C);
+  }
+
+  // Create default white colors for the pointcloud
+  Colors colors(points_C.size(), Color(255, 255, 255));
   
-  // Convert voxblox pointcloud to PCL format
+  // Use current time as timestamp
+  rclcpp::Time stamp = node_->now();
+  
+  // Call the extracted processing function directly
+  processPointCloudMessageAndInsert(points_C, colors, T_G_C, stamp);
+  
+  if (publish_pointclouds_on_update_) {
+    publishPointclouds();
+  }
+
+  if (timing_)
+    RCLCPP_INFO_STREAM(node_->get_logger(), 
+        "Frame [" << frame_count_ << "] timings: " << std::endl
+                  << timing::Timing::Print());
+  if (verbose_)
+    RCLCPP_INFO_STREAM(
+        node_->get_logger(),
+        "Layer memory: " << tsdf_map_->getTsdfLayer().getMemorySize());
+  frame_count_++;
+}
+
+void SlamTsdfReconstruction::publishRawPointcloud(
+    const Pointcloud& points_C,
+    const Transformation& T_G_C) {
+  
+  if (!raw_pointcloud_pub_ || raw_pointcloud_pub_->get_subscription_count() == 0) {
+    return;
+  }
+  
   pcl::PointCloud<pcl::PointXYZ> pcl_cloud;
+  
+  // Transform points from sensor frame to global frame using T_G_C
+  Eigen::Matrix3f T_G_C_rotation = T_G_C.getRotationMatrix().cast<float>();
+  Eigen::Vector3f T_G_C_translation = T_G_C.getPosition().cast<float>();
+  
   for (const auto& point : points_C) {
+    // Transform to global frame: p_global = T_G_C * p_C
+    Eigen::Vector3f p_C(point.x(), point.y(), point.z());
+    Eigen::Vector3f p_global = T_G_C_rotation * p_C + T_G_C_translation;
+    
     pcl::PointXYZ pcl_point;
-    pcl_point.x = point.x();
-    pcl_point.y = point.y();
-    pcl_point.z = point.z();
+    pcl_point.x = p_global.x();
+    pcl_point.y = p_global.y();
+    pcl_point.z = p_global.z();
     pcl_cloud.points.push_back(pcl_point);
   }
+  
   pcl_cloud.width = pcl_cloud.points.size();
   pcl_cloud.height = 1;
   pcl_cloud.is_dense = true;
   
-  // Convert PCL to ROS message
-  pcl::toROSMsg(pcl_cloud, *pointcloud_msg);
-  
-  // Call the ROS message version
-  processPointcloudDirect(pointcloud_msg, T_G_C);
+  // Convert to ROS message and publish
+  sensor_msgs::msg::PointCloud2 cloud_msg;
+  pcl::toROSMsg(pcl_cloud, cloud_msg);
+  cloud_msg.header.frame_id = world_frame_;
+  cloud_msg.header.stamp = node_->now();
+  raw_pointcloud_pub_->publish(cloud_msg);
 }
 
 
