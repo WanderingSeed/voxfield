@@ -59,4 +59,8 @@
   <exec_depend>minkindr_conversions</exec_depend>
 
   <depend>interactive_markers</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

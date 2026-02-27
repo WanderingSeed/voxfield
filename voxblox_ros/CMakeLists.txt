@@ -1,6 +1,9 @@
-############
 cmake_minimum_required(VERSION 3.5)
 project(voxblox_ros)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
 find_package(glog REQUIRED)
 find_package(ament_cmake REQUIRED)
@@ -26,7 +29,6 @@ find_package(tf2_geometry_msgs REQUIRED)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_compile_options(-Wall -Wextra)
 
 #############
 # LIBRARIES #
@@ -118,6 +120,7 @@ target_link_libraries(voxedt_server ${PROJECT_NAME})
 ############
 
 install(TARGETS ${PROJECT_NAME}
+  EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -139,13 +142,19 @@ install(TARGETS
 
 install(DIRECTORY include/ DESTINATION include)
 
+# Export targets
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+
+# Export include directories
 ament_export_include_directories(
   include
   ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# Export libraries
 ament_export_libraries(${PROJECT_NAME})
 
+# Export dependencies
 ament_export_dependencies(${dependencies})
 
 ament_package()

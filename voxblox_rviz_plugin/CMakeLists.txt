@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.8)
 project(voxblox_rviz_plugin)
 
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
 find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_auto REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Core Widgets)
 find_package(rviz_common REQUIRED)
 find_package(rviz_rendering REQUIRED)
@@ -78,6 +81,17 @@ install(
 install(
     DIRECTORY icons/
     DESTINATION share/${PROJECT_NAME}/icons
+)
+
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(
+    rviz_common
+    rviz_rendering
+    rviz_ogre_vendor
+    pluginlib
+    rclcpp
+    voxblox
+    voxblox_msgs
 )
 
 ament_package()

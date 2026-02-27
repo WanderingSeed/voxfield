@@ -2,6 +2,10 @@
 cmake_minimum_required(VERSION 3.5)
 project(voxblox)
 
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -11,7 +15,6 @@ find_package(voxblox_msgs REQUIRED)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_compile_options(-Wall -Wextra)
 
 ##########
 # Protobuf
@@ -63,12 +66,17 @@ set(${PROJECT_NAME}_SRCS
 #############
 add_library(${PROJECT_NAME}_proto ${PROTO_SRCS} ${PROTO_HDRS})
 
-target_include_directories(${PROJECT_NAME}_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR} ${Protobuf_INCLUDE_DIRS})
+target_include_directories(${PROJECT_NAME}_proto PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+  $<INSTALL_INTERFACE:include>
+  ${Protobuf_INCLUDE_DIRS}
+)
 
 add_library(${PROJECT_NAME} ${${PROJECT_NAME}_SRCS})
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+  $<INSTALL_INTERFACE:include>
 )
 if(TARGET minkindr)
   target_include_directories(${PROJECT_NAME} PUBLIC $<TARGET_PROPERTY:minkindr,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -82,6 +90,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC Eigen3::Eigen)
 # Install
 ############
 install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_proto
+  EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -90,7 +99,22 @@ install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_proto
 install(DIRECTORY include/
   DESTINATION include
 )
-ament_export_dependencies(Protobuf minkindr)
+
+install(FILES ${PROTO_HDRS}
+  DESTINATION include/${PROJECT_NAME}
+)
+
+# Export targets
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+
+# Export dependencies
+ament_export_dependencies(
+  Protobuf
+  Eigen3
+  minkindr
+  voxblox_msgs
+)
+
 # Export include directories so other packages (e.g. voxblox_ros) can
 # find generated protobuf headers (Block.pb.h, Layer.pb.h).
 ament_export_include_directories(
@@ -100,6 +124,4 @@ ament_export_include_directories(
 
 ament_export_libraries(${PROJECT_NAME} ${PROJECT_NAME}_proto)
 
-install(FILES ${PROTO_HDRS}
-        DESTINATION include/${PROJECT_NAME})
 ament_package()

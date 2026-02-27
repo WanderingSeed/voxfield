@@ -29,4 +29,7 @@
 
   <build_depend>voxblox_msgs</build_depend>
 
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>
